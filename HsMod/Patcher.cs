@@ -2218,20 +2218,83 @@ namespace HsMod
         {
             [HarmonyPrefix]
             [HarmonyPatch(typeof(CornerSpellReplacementManager), "UpdateCornerReplacements")]
-            private static void PatchUpdateCornerReplacements(ref CornerReplacementContext friendlyNewContext)
+            private static void PatchUpdateCornerReplacements(CornerSpellReplacementManager __instance)
             {
                 try
                 {
+                    if (GameState.Get() == null)
+                    {
+                        return;
+                    }
+
+                    bool shouldRefreshPetCorner = false;
+
                     if (skinPet.Value != -1)
                     {
-                        Player playerBySide2 = GameState.Get()?.GetPlayerBySide(Player.Side.FRIENDLY);
-                        playerBySide2?.SetTag(GAME_TAG.PET_VARIANT_ID, 0);
+                        foreach (PetControllerGame petControllerGame in UnityEngine.Object.FindObjectsOfType<PetControllerGame>())
+                        {
+                            if (petControllerGame.IsFriendly(false))
+                            {
+                                petControllerGame.SetPetFromVariantId(skinPet.Value, true);
+                                break;
+                            }
+                        }
+
+                        Player playerBySide2 = GameState.Get().GetPlayerBySide(Player.Side.FRIENDLY);
+                        playerBySide2?.SetTag(GAME_TAG.PET_VARIANT_ID, skinPet.Value);
+                        shouldRefreshPetCorner = true;
                     }
 
                     if (skinOpposingPet.Value != -1)
                     {
-                        Player playerBySide2 = GameState.Get()?.GetPlayerBySide(Player.Side.OPPOSING);
-                        playerBySide2?.SetTag(GAME_TAG.PET_VARIANT_ID, 0);
+                        Player playerBySide2 = GameState.Get().GetPlayerBySide(Player.Side.OPPOSING);
+                        playerBySide2?.SetTag(GAME_TAG.PET_VARIANT_ID, skinOpposingPet.Value);
+                        shouldRefreshPetCorner = true;
+                    }
+
+                    if (shouldRefreshPetCorner)
+                    {
+                        Type typeFromHandle = typeof(CornerSpellReplacementManager);
+                        FieldInfo field = typeFromHandle.GetField("m_friendlyPlayerCornerContext", BindingFlags.Instance | BindingFlags.NonPublic);
+                        field?.SetValue(__instance, default(CornerReplacementContext));
+
+                        FieldInfo field2 = typeFromHandle.GetField("m_opposingPlayerCornerContext", BindingFlags.Instance | BindingFlags.NonPublic);
+                        field2?.SetValue(__instance, default(CornerReplacementContext));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
+                }
+            }
+
+            [HarmonyPostfix]
+            [HarmonyPatch(typeof(CornerSpellReplacementManager), "UpdateCornerReplacement")]
+            private static void PatchUpdateCornerReplacement(CornerReplacementContext cornerContext, CornerReplacementPosition corner, CornerSpellReplacementManager __instance)
+            {
+                try
+                {
+                    int cornerIndex = (int)corner;
+                    const int opposingPetCorner = 1;
+                    const int friendlyPetCorner = 2;
+
+                    if (cornerIndex == friendlyPetCorner || cornerIndex == opposingPetCorner)
+                    {
+                        Spell spell = ((Spell[])typeof(CornerSpellReplacementManager).GetField("m_cornerReplacementSpells", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(__instance))[cornerIndex];
+                        if (spell == null)
+                        {
+                            return;
+                        }
+
+                        PetCorner component = spell.GetComponent<PetCorner>();
+                        if (component == null)
+                        {
+                            return;
+                        }
+
+                        Player.Side side = ((cornerIndex == friendlyPetCorner) ? Player.Side.FRIENDLY : Player.Side.OPPOSING);
+                        component.OverrideSide(side);
+                        component.RefreshPetCorner();
                     }
                 }
                 catch (Exception ex)
