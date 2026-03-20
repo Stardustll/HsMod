@@ -731,8 +731,8 @@ namespace HsMod
                             {
                                 Utils.MyLogger(LogLevel.Info, $"Found {bundle?.Title}.");
                                 StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, CurrencyType.GOLD, 1));
-                                UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
-                                return;
+                                UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);/
+                                continue;
                             }
                         }
                         foreach (CurrencyType pt in Enum.GetValues(typeof(CurrencyType)))
