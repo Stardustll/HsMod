@@ -110,6 +110,9 @@ namespace HsMod
                 Logger.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
                 PatchManager.PatchSettingDelegate();
                 PatchManager.PatchAll();
+                PetEntityInjector.FriendlyPetVariantId = skinPet.Value;
+                PetEntityInjector.OpposingPetVariantId = skinOpposingPet.Value;
+                PetEntityInjector.ApplyPatches();
             }
             else
             {

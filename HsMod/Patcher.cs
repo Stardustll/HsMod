@@ -2227,19 +2227,13 @@ namespace HsMod
                         return;
                     }
 
+                    PetEntityInjector.FriendlyPetVariantId = skinPet.Value;
+                    PetEntityInjector.OpposingPetVariantId = skinOpposingPet.Value;
+
                     bool shouldRefreshPetCorner = false;
 
                     if (skinPet.Value != -1)
                     {
-                        foreach (PetControllerGame petControllerGame in UnityEngine.Object.FindObjectsOfType<PetControllerGame>())
-                        {
-                            if (petControllerGame.IsFriendly(false))
-                            {
-                                petControllerGame.SetPetFromVariantId(skinPet.Value, true);
-                                break;
-                            }
-                        }
-
                         Player playerBySide2 = GameState.Get().GetPlayerBySide(Player.Side.FRIENDLY);
                         playerBySide2?.SetTag(GAME_TAG.PET_VARIANT_ID, skinPet.Value);
                         shouldRefreshPetCorner = true;
@@ -2265,6 +2259,86 @@ namespace HsMod
                 catch (Exception ex)
                 {
                     Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
+                }
+            }
+
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PetControllerGame), "SetPet")]
+            private static void PatchPetControllerSetPet(PetControllerGame __instance, ref string petDataHandler, bool create)
+            {
+                try
+                {
+                    if (__instance == null)
+                    {
+                        return;
+                    }
+
+                    int targetVariantId = __instance.IsFriendly(false) ? skinPet.Value : skinOpposingPet.Value;
+                    if (targetVariantId < 0)
+                    {
+                        return;
+                    }
+
+                    Entity entity = __instance.GetEntity();
+                    PetVariantDbfRecord targetVariant = (targetVariantId > 0) ? GameDbf.PetVariant.GetRecord(targetVariantId) : null;
+
+                    if (entity != null)
+                    {
+                        entity.SetTag(GAME_TAG.PET_VARIANT_ID, targetVariantId);
+                        if (targetVariant != null)
+                        {
+                            entity.SetTag((GAME_TAG)4079, targetVariant.PetId);
+                        }
+                    }
+
+                    if (targetVariantId == 0)
+                    {
+                        petDataHandler = string.Empty;
+                        return;
+                    }
+
+                    if (targetVariant == null)
+                    {
+                        return;
+                    }
+
+                    string targetCardId = GameUtils.TranslateDbIdToCardId(targetVariant.CardId, false);
+                    if (!string.IsNullOrEmpty(targetCardId))
+                    {
+                        petDataHandler = targetCardId;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
+                }
+            }
+
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PetControllerGame), "FindOverridePet")]
+            private static bool PatchFindOverridePet(PetControllerGame __instance, ref int overridePetVariantId, ref bool __result)
+            {
+                try
+                {
+                    if (__instance == null)
+                    {
+                        return true;
+                    }
+
+                    int targetVariantId = __instance.IsFriendly(false) ? skinPet.Value : skinOpposingPet.Value;
+                    if (targetVariantId <= 0)
+                    {
+                        return true;
+                    }
+
+                    overridePetVariantId = targetVariantId;
+                    __result = true;
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
+                    return true;
                 }
             }
 

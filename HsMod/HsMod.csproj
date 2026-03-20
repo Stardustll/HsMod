@@ -395,6 +395,7 @@
   <ItemGroup>
     <Compile Include="FileManager.cs" />
     <Compile Include="LocalizationManager.cs" />
+    <Compile Include="PetEntityInjector.cs" />
     <Compile Include="PluginConfig.cs" />
     <Compile Include="Patcher.cs" />
     <Compile Include="Main.cs" />
