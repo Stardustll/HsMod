@@ -580,6 +580,7 @@ namespace HsMod
             {
                 string temp = @"<table border=0 style=""text-align: center;""><tr>";
                 temp += "<th>索引</th>";
+                temp += "<th>卡牌ID</th>";
                 temp += "<th>名称</th>";
                 temp += "</tr>";
 
@@ -589,6 +590,9 @@ namespace HsMod
                     {
                         temp += "<tr>";
                         temp += $"<td>{record.CardId}</td>";
+                        string coinStringId = "";
+                        try { coinStringId = GameUtils.TranslateDbIdToCardId(record.CardId); } catch { }
+                        temp += $"<td>{coinStringId}</td>";
                         temp += $"<td>{record.Name.GetString()}</td>";
                         temp += "</tr>";
                     }
@@ -710,7 +714,9 @@ namespace HsMod
             {
                 string temp = @"<table border=0 style=""text-align: center;""><tr>";
                 temp += "<th>索引</th>";
+                temp += "<th>卡牌ID</th>";
                 temp += "<th>名称</th>";
+                temp += "<th>职业</th>";
                 temp += "<th>类型</th>";
                 temp += "</tr>";
 
@@ -720,7 +726,19 @@ namespace HsMod
                     {
                         temp += "<tr>";
                         temp += $"<td>{record.CardId}</td>";
+                        string cardStringId = "";
+                        string className = "";
+                        try { cardStringId = GameUtils.TranslateDbIdToCardId(record.CardId); } catch { }
+                        try
+                        {
+                            var entityDef = DefLoader.Get()?.GetEntityDef(record.CardId);
+                            if (entityDef != null)
+                                className = GameStrings.GetClassName(entityDef.GetClass());
+                        }
+                        catch { }
+                        temp += $"<td>{cardStringId}</td>";
                         temp += $"<td>{GameDbf.Card.GetRecord(record.CardId).Name.GetString()}</td>";
+                        temp += $"<td>{className}</td>";
                         switch (record.HeroType)
                         {
                             case Assets.CardHero.HeroType.BATTLEGROUNDS_HERO:
