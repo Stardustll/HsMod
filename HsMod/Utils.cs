@@ -16,7 +16,7 @@ namespace HsMod
 {
     public partial class Utils
     {
-        private const float ZeroDollarShoppingPauseSeconds = 5f;
+        private const float ZeroDollarShoppingPauseSeconds = 10f;
         private static Coroutine _zeroDollarShoppingCoroutine;
 
         public enum CardState
@@ -767,6 +767,7 @@ namespace HsMod
         private static IEnumerator ZeroDollarShoppingRoutineCore()
         {
             var foundAny = false;
+            var purchasedBundleIds = new HashSet<long>();
 
             foreach (PegasusUtil.ProductType t in Enum.GetValues(typeof(PegasusUtil.ProductType)))
             {
@@ -777,20 +778,30 @@ namespace HsMod
                     {
                         continue;
                     }
+
+                    var boughtCurrentBundle = false;
+                    var bundleId = bundle?.Id.Value ?? 0;
                     if (bundle?.GetFirstVirtualCurrencyPriceType() == CurrencyType.NONE)
                     {
                         if (!bundle.TryGetBundlePrice(CurrencyType.GOLD, out _))
                         {
-                            foundAny = true;
-                            Utils.MyLogger(LogLevel.Info, $"Found {bundle?.Title}.");
-                            StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, CurrencyType.GOLD, 1));
-                            UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
-                            yield return new WaitForSeconds(ZeroDollarShoppingPauseSeconds);
-                            continue;
+                            if (purchasedBundleIds.Add(bundleId))
+                            {
+                                foundAny = true;
+                                boughtCurrentBundle = true;
+                                Utils.MyLogger(LogLevel.Info, $"Found {bundle?.Title}.");
+                                StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, CurrencyType.GOLD, 1));
+                                UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
+                                yield return new WaitForSeconds(ZeroDollarShoppingPauseSeconds);
+                            }
                         }
                     }
                     foreach (CurrencyType pt in Enum.GetValues(typeof(CurrencyType)))
                     {
+                        if (boughtCurrentBundle)
+                        {
+                            break;
+                        }
 
                         if (null != bundle)
                         {
@@ -812,10 +823,21 @@ namespace HsMod
                             if (totalPrice == 0)
                             {
                                 Utils.MyLogger(LogLevel.Warning, $"{t.ToString()}[true] id={bundle?.Id} title={bundle?.Title} price=0!!!");
-                                //StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, pt, 1));
+                                if (purchasedBundleIds.Add(bundleId))
+                                {
+                                    foundAny = true;
+                                    boughtCurrentBundle = true;
+                                    StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, pt, 1));
+                                    UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
+                                    yield return new WaitForSeconds(ZeroDollarShoppingPauseSeconds);
+                                }
                             }
 
                         }
+                    }
+                    if (boughtCurrentBundle)
+                    {
+                        continue;
                     }
                     foreach (var id in bundle?.SaleIds)
                     {
@@ -836,6 +858,8 @@ namespace HsMod
                         // ！！！
                         Utils.MyLogger(LogLevel.Info, $"[{StoreManager.Get().CanBuyBundle(bundle)}]{t.ToString()}[false] type={bundle?.GetFirstVirtualCurrencyPriceType()} id={bundle?.Id} title={bundle?.Title} des={bundle?.Description}");
 
+                        var boughtCurrentBundle = false;
+                        var bundleId = bundle?.Id.Value ?? 0;
                         if (bundle?.GetFirstVirtualCurrencyPriceType() == CurrencyType.NONE)
                         {
                             if (!bundle.TryGetBundlePrice(CurrencyType.GOLD, out _))
@@ -848,36 +872,52 @@ namespace HsMod
                                 //    return;
                                 //}
                                 Utils.MyLogger(LogLevel.Error, $"[{StoreManager.Get().CanBuyBundle(bundle)}]{t.ToString()}[false] id={bundle?.Id} title={bundle?.Title} des={bundle?.Description}");
-                                //continue;
-                                //
-                                foundAny = true;
-                                Utils.MyLogger(LogLevel.Info, $"Found {bundle?.Title}.");
-                                StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, (CurrencyType)(targetFrameRate.Value - 180), 1));
-                                UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
-                                yield return new WaitForSeconds(ZeroDollarShoppingPauseSeconds);
-                                continue;
+                                if (purchasedBundleIds.Add(bundleId))
+                                {
+                                    foundAny = true;
+                                    boughtCurrentBundle = true;
+                                    Utils.MyLogger(LogLevel.Info, $"Found {bundle?.Title}.");
+                                    StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, (CurrencyType)(targetFrameRate.Value - 180), 1));
+                                    UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
+                                    yield return new WaitForSeconds(ZeroDollarShoppingPauseSeconds);
+                                }
                             }
                         }
-                        //foreach (CurrencyType pt in Enum.GetValues(typeof(CurrencyType)))
-                        //{
+                        foreach (CurrencyType pt in Enum.GetValues(typeof(CurrencyType)))
+                        {
+                            if (boughtCurrentBundle)
+                            {
+                                break;
+                            }
 
-                        //    if (null != bundle)
-                        //    {
-                        //        var pd = bundle?.GetPriceDataModel(pt);
-                        //        double totalPrice;
-                        //        if (!bundle.TryGetBundlePrice(pt, out totalPrice))
-                        //        {
-                        //            //Utils.MyLogger(LogLevel.Warning, string.Format("Product {0} does not have requested cost for {1}", bundle.Id, pd));.
-                        //            continue;
-                        //        }
-                        //        Utils.MyLogger(LogLevel.Info, $"type={pt} Currency/FirstVirtualCurrency={pd?.Currency}/{bundle?.GetFirstVirtualCurrencyPriceType()} price={totalPrice} Amount={pd?.Amount} OriginalAmount={pd?.OriginalAmount} OriginalDisplayText={pd?.OriginalDisplayText}");
-                        //        if (totalPrice == 0)
-                        //        {
-                        //            Utils.MyLogger(LogLevel.Warning, $"{t.ToString()}[true] id={bundle?.Id} title={bundle?.Title} price=0!!!");
-                        //            //StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(gz, pt, 1));
-                        //        }
-                        //    }
-                        //}
+                            if (null == bundle)
+                            {
+                                continue;
+                            }
+                            var pd = bundle?.GetPriceDataModel(pt);
+                            double totalPrice;
+                            if (!bundle.TryGetBundlePrice(pt, out totalPrice))
+                            {
+                                continue;
+                            }
+                            Utils.MyLogger(LogLevel.Info, $"type={pt} Currency/FirstVirtualCurrency={pd?.Currency}/{bundle?.GetFirstVirtualCurrencyPriceType()} price={totalPrice} Amount={pd?.Amount} OriginalAmount={pd?.OriginalAmount} OriginalDisplayText={pd?.OriginalDisplayText}");
+                            if (totalPrice == 0)
+                            {
+                                Utils.MyLogger(LogLevel.Warning, $"{t.ToString()}[false] id={bundle?.Id} title={bundle?.Title} price=0!!!");
+                                if (purchasedBundleIds.Add(bundleId))
+                                {
+                                    foundAny = true;
+                                    boughtCurrentBundle = true;
+                                    StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, pt, 1));
+                                    UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
+                                    yield return new WaitForSeconds(ZeroDollarShoppingPauseSeconds);
+                                }
+                            }
+                        }
+                        if (boughtCurrentBundle)
+                        {
+                            continue;
+                        }
                         //foreach (var id in bundle?.SaleIds)
                         //{
                         //    Utils.MyLogger(LogLevel.Info, $"saleid={id}");
