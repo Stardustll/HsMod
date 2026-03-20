@@ -10,6 +10,8 @@ namespace HsMod
     [BepInPlugin(PluginInfo.PLUGIN_GUID, PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
+        public static Plugin Instance { get; private set; }
+
         private void OnGUI()
         {
             if (UtilsArgu.Instance.Exists("hsunitid"))
@@ -20,6 +22,8 @@ namespace HsMod
         }
         private void Awake()
         {
+            Instance = this;
+
             // enable logging bepinex and unity to disk without append
             try
             {
@@ -395,6 +399,10 @@ namespace HsMod
 
         private void OnDestroy()
         {
+            if (ReferenceEquals(Instance, this))
+            {
+                Instance = null;
+            }
             // PatchManager.UnPatchAll();
         }
 
