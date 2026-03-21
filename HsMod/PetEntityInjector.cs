@@ -10,6 +10,7 @@ namespace HsMod
     internal static class PetEntityInjector
     {
         private const int MaxRetry = 300;
+
         private static bool s_patched;
         private static bool s_injected;
         private static bool s_cardAdded;
@@ -17,6 +18,7 @@ namespace HsMod
         private static bool s_updatingLayout;
         private static int s_retryCount;
         private static int s_friendlyEntityId = -1;
+        private static int s_opposingEntityId = -1;
         private static int s_friendlyControllerId = -1;
 
         public static int FriendlyPetVariantId = -1;
@@ -42,6 +44,7 @@ namespace HsMod
             s_updatingLayout = false;
             s_retryCount = 0;
             s_friendlyEntityId = -1;
+            s_opposingEntityId = -1;
             s_friendlyControllerId = -1;
         }
 
@@ -122,6 +125,7 @@ namespace HsMod
                 Player opposingPlayer = gameState.GetPlayerBySide(Player.Side.OPPOSING);
                 if (opposingPlayer != null)
                 {
+                    s_opposingEntityId = nextEntityId;
                     InjectOnePet(gameState, nextEntityId++, opposingPlayer.GetPlayerId(), OpposingPetVariantId);
                 }
             }
@@ -131,15 +135,12 @@ namespace HsMod
         {
             try
             {
-                string cardId = GetPetCardId(variantId);
-                PetVariantDbfRecord variantRecord = GameDbf.PetVariant.GetRecord(variantId);
-
                 Network.HistFullEntity fullEntity = new Network.HistFullEntity();
                 Network.Entity networkEntity = new Network.Entity();
                 fullEntity.Entity = networkEntity;
 
                 SetNetworkEntityId(networkEntity, entityId);
-                SetNetworkEntityCardId(networkEntity, cardId ?? string.Empty);
+                SetNetworkEntityCardId(networkEntity, string.Empty);
                 InitEntityListProperty(networkEntity, "TagLists");
                 InitEntityListProperty(networkEntity, "DefTagLists");
                 InitEntityListProperty(networkEntity, "DefTags");
@@ -152,17 +153,12 @@ namespace HsMod
                     MakeTag((int)GAME_TAG.PET_VARIANT_ID, variantId)
                 };
 
-                if (variantRecord != null)
-                {
-                    fullEntity.Entity.Tags.Add(MakeTag(4079, variantRecord.PetId));
-                }
-
                 gameState.OnRealTimeFullEntity(fullEntity);
 
                 Entity entity = gameState.GetEntity(entityId);
                 if (entity == null)
                 {
-                    entity = CreateRuntimePetEntity(entityId, controllerId, variantId, variantRecord, cardId);
+                    entity = CreateRuntimePetEntity(entityId, controllerId, variantId);
                     if (entity == null || !AddEntityToGameState(gameState, entityId, entity))
                     {
                         LogError($"Injected pet entity {entityId} was not created.");
@@ -174,14 +170,6 @@ namespace HsMod
                 entity.SetTag((GAME_TAG)50, controllerId);
                 entity.SetTag((GAME_TAG)202, 45);
                 entity.SetTag(GAME_TAG.PET_VARIANT_ID, variantId);
-                if (variantRecord != null)
-                {
-                    entity.SetTag((GAME_TAG)4079, variantRecord.PetId);
-                }
-                if (!string.IsNullOrEmpty(cardId))
-                {
-                    entity.SetCardId(cardId);
-                }
 
                 Player player = GetPlayerByControllerId(gameState, controllerId);
                 player?.SetPet(entity);
@@ -193,7 +181,7 @@ namespace HsMod
             }
         }
 
-        private static Entity CreateRuntimePetEntity(int entityId, int controllerId, int variantId, PetVariantDbfRecord variantRecord, string cardId)
+        private static Entity CreateRuntimePetEntity(int entityId, int controllerId, int variantId)
         {
             try
             {
@@ -216,15 +204,6 @@ namespace HsMod
                 entity.SetTag((GAME_TAG)50, controllerId);
                 entity.SetTag((GAME_TAG)202, 45);
                 entity.SetTag(GAME_TAG.PET_VARIANT_ID, variantId);
-                if (variantRecord != null)
-                {
-                    entity.SetTag((GAME_TAG)4079, variantRecord.PetId);
-                }
-                if (!string.IsNullOrEmpty(cardId))
-                {
-                    entity.SetCardId(cardId);
-                }
-
                 return entity;
             }
             catch (Exception ex)
@@ -283,18 +262,22 @@ namespace HsMod
                 {
                     s_loadCardCalled = true;
 
-                    string cardId = GetPetCardId(variantId);
-                    if (string.IsNullOrEmpty(cardId))
+                    if (string.IsNullOrEmpty(entity.GetCardId()))
                     {
-                        LogError("CardId is empty, cannot load card.");
-                        return false;
+                        string petCardId = GetPetCardId(variantId);
+                        if (string.IsNullOrEmpty(petCardId))
+                        {
+                            LogError("CardId is empty, cannot load card.");
+                            return false;
+                        }
+
+                        entity.SetCardId(petCardId);
                     }
 
-                    entity.SetCardId(cardId);
+                    string cardId = entity.GetCardId();
                     typeof(Entity).GetMethod("InitCard", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.Invoke(entity, null);
 
-                    ZoneMgr zoneMgr = ZoneMgr.Get();
-                    ZoneCosmetic zoneCosmetic = zoneMgr?.FindZoneOfType<ZoneCosmetic>(Player.Side.FRIENDLY);
+                    ZoneCosmetic zoneCosmetic = ZoneMgr.Get()?.FindZoneOfType<ZoneCosmetic>(Player.Side.FRIENDLY);
                     if (zoneCosmetic == null)
                     {
                         return false;
@@ -318,11 +301,7 @@ namespace HsMod
                         .FirstOrDefault(m => m.Name == "LoadCard" && m.GetParameters().Length == 3);
                     loadCardMethod?.Invoke(entity, new object[] { cardId, loadCardData, false });
 
-                    List<Card> cards = typeof(Zone).GetField("m_cards", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(zoneCosmetic) as List<Card>;
-                    if (cards != null && !cards.Contains(card))
-                    {
-                        cards.Add(card);
-                    }
+                    AddCardToZoneCards(zoneCosmetic, card);
                 }
 
                 Card petCard = entity.GetCard();
@@ -356,8 +335,6 @@ namespace HsMod
                 friendlyZone.UpdateLayout();
                 s_updatingLayout = false;
 
-                // The first SetPet call often happens before layout is ready and gets blocked.
-                // Trigger the native update path again after layout so the pet model is created.
                 actor.UpdatePetComponents();
                 actor.m_petController?.CreatePetObject();
 
@@ -369,6 +346,20 @@ namespace HsMod
                 s_updatingLayout = false;
                 LogError(ex.ToString());
                 return false;
+            }
+        }
+
+        private static void AddCardToZoneCards(Zone zone, Card card)
+        {
+            if (zone == null || card == null)
+            {
+                return;
+            }
+
+            List<Card> cards = typeof(Zone).GetField("m_cards", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(zone) as List<Card>;
+            if (cards != null && !cards.Contains(card))
+            {
+                cards.Add(card);
             }
         }
 
