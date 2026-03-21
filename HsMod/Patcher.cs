@@ -2216,6 +2216,9 @@ namespace HsMod
 
         public class PatchFavorite
         {
+            private static readonly FieldInfo s_cornerReplacementSpellsField = typeof(CornerSpellReplacementManager).GetField("m_cornerReplacementSpells", BindingFlags.Instance | BindingFlags.NonPublic);
+            private static readonly FieldInfo s_petCornerSideField = typeof(PetCorner).GetField("m_side", BindingFlags.Instance | BindingFlags.NonPublic);
+
             [HarmonyPrefix]
             [HarmonyPatch(typeof(CornerSpellReplacementManager), "UpdateCornerReplacements")]
             private static void PatchUpdateCornerReplacements(CornerSpellReplacementManager __instance)
@@ -2342,33 +2345,151 @@ namespace HsMod
                 }
             }
 
+            private static Player.Side GetPetControllerSide(PetControllerGame petController)
+            {
+                if (petController != null)
+                {
+                    GameState gameState = GameState.Get();
+                    Entity entity = petController.GetEntity();
+                    if (gameState != null && entity != null)
+                    {
+                        int controllerId = entity.GetTag(GAME_TAG.CONTROLLER);
+                        Player friendlyPlayer = gameState.GetPlayerBySide(Player.Side.FRIENDLY);
+                        if (friendlyPlayer != null && friendlyPlayer.GetPlayerId() == controllerId)
+                        {
+                            return Player.Side.FRIENDLY;
+                        }
+
+                        Player opposingPlayer = gameState.GetPlayerBySide(Player.Side.OPPOSING);
+                        if (opposingPlayer != null && opposingPlayer.GetPlayerId() == controllerId)
+                        {
+                            return Player.Side.OPPOSING;
+                        }
+                    }
+
+                    if (petController.IsFriendly(false))
+                    {
+                        return Player.Side.FRIENDLY;
+                    }
+                }
+
+                return Player.Side.OPPOSING;
+            }
+
+            private static Transform FindPetRootForSide(Player.Side side)
+            {
+                PetCorner[] petCorners = UnityEngine.Object.FindObjectsOfType<PetCorner>();
+                if (petCorners == null || petCorners.Length == 0)
+                {
+                    return null;
+                }
+
+                foreach (PetCorner petCorner in petCorners)
+                {
+                    if (petCorner == null)
+                    {
+                        continue;
+                    }
+
+                    object cornerSideValue = s_petCornerSideField?.GetValue(petCorner);
+                    if (!(cornerSideValue is Player.Side) || (Player.Side)cornerSideValue != side)
+                    {
+                        continue;
+                    }
+
+                    Transform petPosition = petCorner.PetPosition;
+                    if (petPosition != null)
+                    {
+                        return petPosition;
+                    }
+                }
+
+                return null;
+            }
+
+            private static void UpdatePetRoot(PetControllerGame petController)
+            {
+                if (petController == null)
+                {
+                    return;
+                }
+
+                Transform petRoot = FindPetRootForSide(GetPetControllerSide(petController));
+                if (petRoot != null)
+                {
+                    petController.SetPetRoot(petRoot);
+                }
+            }
+
+            private static bool TryGetPetCornerSide(CornerReplacementPosition corner, out Player.Side side)
+            {
+                switch (corner)
+                {
+                    case CornerReplacementPosition.BOTTOM_LEFT:
+                        side = Player.Side.FRIENDLY;
+                        return true;
+                    case CornerReplacementPosition.TOP_RIGHT:
+                        side = Player.Side.OPPOSING;
+                        return true;
+                    default:
+                        side = default;
+                        return false;
+                }
+            }
+
+            private static void RefreshPetCorner(CornerSpellReplacementManager cornerManager, CornerReplacementPosition corner, Player.Side side)
+            {
+                if (cornerManager == null)
+                {
+                    return;
+                }
+
+                Spell[] cornerReplacementSpells = s_cornerReplacementSpellsField?.GetValue(cornerManager) as Spell[];
+                int cornerIndex = (int)corner;
+                if (cornerReplacementSpells == null || cornerIndex < 0 || cornerIndex >= cornerReplacementSpells.Length)
+                {
+                    return;
+                }
+
+                Spell spell = cornerReplacementSpells[cornerIndex];
+                if (spell == null)
+                {
+                    return;
+                }
+
+                PetCorner component = spell.GetComponent<PetCorner>();
+                if (component == null)
+                {
+                    return;
+                }
+
+                component.OverrideSide(side);
+                component.RefreshPetCorner();
+            }
+
+            [HarmonyPostfix]
+            [HarmonyPatch(typeof(PetControllerGame), "HandleUpdateLayout")]
+            private static void PatchHandleUpdateLayout(PetControllerGame __instance)
+            {
+                try
+                {
+                    UpdatePetRoot(__instance);
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
+                }
+            }
+
             [HarmonyPostfix]
             [HarmonyPatch(typeof(CornerSpellReplacementManager), "UpdateCornerReplacement")]
             private static void PatchUpdateCornerReplacement(CornerReplacementContext cornerContext, CornerReplacementPosition corner, CornerSpellReplacementManager __instance)
             {
                 try
                 {
-                    int cornerIndex = (int)corner;
-                    const int opposingPetCorner = 1;
-                    const int friendlyPetCorner = 2;
-
-                    if (cornerIndex == friendlyPetCorner || cornerIndex == opposingPetCorner)
+                    if (TryGetPetCornerSide(corner, out Player.Side side))
                     {
-                        Spell spell = ((Spell[])typeof(CornerSpellReplacementManager).GetField("m_cornerReplacementSpells", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(__instance))[cornerIndex];
-                        if (spell == null)
-                        {
-                            return;
-                        }
-
-                        PetCorner component = spell.GetComponent<PetCorner>();
-                        if (component == null)
-                        {
-                            return;
-                        }
-
-                        Player.Side side = ((cornerIndex == friendlyPetCorner) ? Player.Side.FRIENDLY : Player.Side.OPPOSING);
-                        component.OverrideSide(side);
-                        component.RefreshPetCorner();
+                        RefreshPetCorner(__instance, corner, side);
                     }
                 }
                 catch (Exception ex)
