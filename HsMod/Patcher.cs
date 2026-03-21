@@ -2218,7 +2218,6 @@ namespace HsMod
         {
             private static readonly FieldInfo s_cornerReplacementSpellsField = typeof(CornerSpellReplacementManager).GetField("m_cornerReplacementSpells", BindingFlags.Instance | BindingFlags.NonPublic);
             private static readonly FieldInfo s_petCornerSideField = typeof(PetCorner).GetField("m_side", BindingFlags.Instance | BindingFlags.NonPublic);
-            private static readonly MethodInfo s_updateRootObjectSpellComponentsMethod = typeof(Actor).GetMethod("UpdateRootObjectSpellComponents", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
             [HarmonyPrefix]
             [HarmonyPatch(typeof(CornerSpellReplacementManager), "UpdateCornerReplacements")]
@@ -2446,30 +2445,6 @@ namespace HsMod
                 Actor actor = petController.GetComponentInParent<Actor>();
                 actor?.UpdatePetComponents();
                 petController.CreatePetObject();
-                RefreshHeroWeaponSockets(Player.Side.OPPOSING);
-            }
-
-            private static void RefreshHeroWeaponSockets(Player.Side side)
-            {
-                try
-                {
-                    Card heroCard = GameState.Get()?.GetPlayerBySide(side)?.GetHeroCard();
-                    Actor heroActor = heroCard?.GetActor();
-                    Entity heroEntity = heroCard?.GetEntity();
-                    if (heroActor == null || heroEntity == null)
-                    {
-                        return;
-                    }
-
-                    heroActor.SetCard(heroCard);
-                    heroActor.SetCardDefFromEntity(heroEntity);
-                    heroActor.SetEntity(heroEntity);
-                    s_updateRootObjectSpellComponentsMethod?.Invoke(heroActor, null);
-                }
-                catch (Exception ex)
-                {
-                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
-                }
             }
 
             private static void RefreshOpposingPetBodiesInScene()
@@ -2791,7 +2766,7 @@ namespace HsMod
                     }
 
                     TAG_ZONE zone = entity.GetZone();
-                    if (zone != TAG_ZONE.PLAY && zone != TAG_ZONE.HAND)
+                    if (zone != TAG_ZONE.PLAY)
                     {
                         return;
                     }

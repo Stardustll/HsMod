@@ -18,7 +18,6 @@ namespace HsMod
         private static bool s_friendlyLoadCardCalled;
         private static bool s_opposingLoadCardCalled;
         private static bool s_updatingLayout;
-        private static readonly MethodInfo s_updateRootObjectSpellComponentsMethod = typeof(Actor).GetMethod("UpdateRootObjectSpellComponents", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static int s_friendlyRetryCount;
         private static int s_opposingRetryCount;
         private static int s_friendlyEntityId = -1;
@@ -395,7 +394,6 @@ namespace HsMod
 
                 actor.UpdatePetComponents();
                 actor.m_petController?.CreatePetObject();
-                RefreshHeroWeaponSockets(gameState, side);
 
                 Log($"{side} pet card added to ZoneCosmetic successfully.");
                 return true;
@@ -437,29 +435,6 @@ namespace HsMod
             }
 
             return null;
-        }
-
-        private static void RefreshHeroWeaponSockets(GameState gameState, Player.Side side)
-        {
-            try
-            {
-                Card heroCard = gameState?.GetPlayerBySide(side)?.GetHeroCard();
-                Actor heroActor = heroCard?.GetActor();
-                Entity heroEntity = heroCard?.GetEntity();
-                if (heroActor == null || heroEntity == null)
-                {
-                    return;
-                }
-
-                heroActor.SetCard(heroCard);
-                heroActor.SetCardDefFromEntity(heroEntity);
-                heroActor.SetEntity(heroEntity);
-                s_updateRootObjectSpellComponentsMethod?.Invoke(heroActor, null);
-            }
-            catch (Exception ex)
-            {
-                LogError("RefreshHeroWeaponSockets failed: " + ex);
-            }
         }
 
         private static string GetPetCardId(int variantId)
