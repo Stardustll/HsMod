@@ -2421,6 +2421,51 @@ namespace HsMod
                 }
             }
 
+            private static void RefreshOpposingPetBody(PetControllerGame petController)
+            {
+                if (petController == null || GetPetControllerSide(petController) != Player.Side.OPPOSING || skinOpposingPet.Value < 0)
+                {
+                    return;
+                }
+
+                Entity entity = petController.GetEntity();
+                PetVariantDbfRecord targetVariant = (skinOpposingPet.Value > 0) ? GameDbf.PetVariant.GetRecord(skinOpposingPet.Value) : null;
+                if (entity != null)
+                {
+                    entity.SetTag(GAME_TAG.PET_VARIANT_ID, skinOpposingPet.Value);
+                    if (targetVariant != null)
+                    {
+                        entity.SetTag((GAME_TAG)4079, targetVariant.PetId);
+                    }
+                }
+
+                UpdatePetRoot(petController);
+                petController.SetPetFromVariantId(skinOpposingPet.Value, true);
+
+                Actor actor = petController.GetComponentInParent<Actor>();
+                actor?.UpdatePetComponents();
+                petController.CreatePetObject();
+            }
+
+            private static void RefreshOpposingPetBodiesInScene()
+            {
+                if (skinOpposingPet.Value < 0)
+                {
+                    return;
+                }
+
+                PetControllerGame[] petControllers = UnityEngine.Object.FindObjectsOfType<PetControllerGame>();
+                if (petControllers == null || petControllers.Length == 0)
+                {
+                    return;
+                }
+
+                foreach (PetControllerGame petController in petControllers)
+                {
+                    RefreshOpposingPetBody(petController);
+                }
+            }
+
             private static bool TryGetPetCornerSide(CornerReplacementPosition corner, out Player.Side side)
             {
                 switch (corner)
@@ -2474,6 +2519,7 @@ namespace HsMod
                 try
                 {
                     UpdatePetRoot(__instance);
+                    RefreshOpposingPetBody(__instance);
                 }
                 catch (Exception ex)
                 {
@@ -2490,6 +2536,10 @@ namespace HsMod
                     if (TryGetPetCornerSide(corner, out Player.Side side))
                     {
                         RefreshPetCorner(__instance, corner, side);
+                        if (side == Player.Side.OPPOSING)
+                        {
+                            RefreshOpposingPetBodiesInScene();
+                        }
                     }
                 }
                 catch (Exception ex)

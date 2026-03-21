@@ -13,13 +13,17 @@ namespace HsMod
 
         private static bool s_patched;
         private static bool s_injected;
-        private static bool s_cardAdded;
-        private static bool s_loadCardCalled;
+        private static bool s_friendlyCardAdded;
+        private static bool s_opposingCardAdded;
+        private static bool s_friendlyLoadCardCalled;
+        private static bool s_opposingLoadCardCalled;
         private static bool s_updatingLayout;
-        private static int s_retryCount;
+        private static int s_friendlyRetryCount;
+        private static int s_opposingRetryCount;
         private static int s_friendlyEntityId = -1;
         private static int s_opposingEntityId = -1;
         private static int s_friendlyControllerId = -1;
+        private static int s_opposingControllerId = -1;
 
         public static int FriendlyPetVariantId = -1;
         public static int OpposingPetVariantId = -1;
@@ -39,13 +43,17 @@ namespace HsMod
         private static void ResetState()
         {
             s_injected = false;
-            s_cardAdded = false;
-            s_loadCardCalled = false;
+            s_friendlyCardAdded = false;
+            s_opposingCardAdded = false;
+            s_friendlyLoadCardCalled = false;
+            s_opposingLoadCardCalled = false;
             s_updatingLayout = false;
-            s_retryCount = 0;
+            s_friendlyRetryCount = 0;
+            s_opposingRetryCount = 0;
             s_friendlyEntityId = -1;
             s_opposingEntityId = -1;
             s_friendlyControllerId = -1;
+            s_opposingControllerId = -1;
         }
 
         [HarmonyPrefix]
@@ -70,13 +78,9 @@ namespace HsMod
                     return;
                 }
 
-                if (s_injected && s_friendlyEntityId > 0)
+                if (s_injected && IsInjectedEntityMissing(gameState))
                 {
-                    Map<int, Entity> entityMap = gameState.GetEntityMap();
-                    if (entityMap == null || !entityMap.ContainsKey(s_friendlyEntityId))
-                    {
-                        ResetState();
-                    }
+                    ResetState();
                 }
 
                 if (!s_injected)
@@ -85,17 +89,31 @@ namespace HsMod
                     s_injected = true;
                 }
 
-                if (!s_cardAdded && FriendlyPetVariantId >= 0 && s_friendlyEntityId > 0)
+                if (!s_friendlyCardAdded && FriendlyPetVariantId >= 0 && s_friendlyEntityId > 0)
                 {
-                    s_retryCount++;
-                    if (s_retryCount > MaxRetry)
+                    s_friendlyRetryCount++;
+                    if (s_friendlyRetryCount > MaxRetry)
                     {
-                        s_cardAdded = true;
-                        LogError("Max retry reached, giving up on pet injection.");
+                        s_friendlyCardAdded = true;
+                        LogError("Max retry reached, giving up on friendly pet injection.");
                     }
-                    else if (AddEntityCardToZoneCosmetic(gameState, s_friendlyEntityId, FriendlyPetVariantId))
+                    else if (AddEntityCardToZoneCosmetic(gameState, s_friendlyEntityId, FriendlyPetVariantId, Player.Side.FRIENDLY))
                     {
-                        s_cardAdded = true;
+                        s_friendlyCardAdded = true;
+                    }
+                }
+
+                if (!s_opposingCardAdded && OpposingPetVariantId >= 0 && s_opposingEntityId > 0)
+                {
+                    s_opposingRetryCount++;
+                    if (s_opposingRetryCount > MaxRetry)
+                    {
+                        s_opposingCardAdded = true;
+                        LogError("Max retry reached, giving up on opposing pet injection.");
+                    }
+                    else if (AddEntityCardToZoneCosmetic(gameState, s_opposingEntityId, OpposingPetVariantId, Player.Side.OPPOSING))
+                    {
+                        s_opposingCardAdded = true;
                     }
                 }
             }
@@ -126,7 +144,8 @@ namespace HsMod
                 if (opposingPlayer != null)
                 {
                     s_opposingEntityId = nextEntityId;
-                    InjectOnePet(gameState, nextEntityId++, opposingPlayer.GetPlayerId(), OpposingPetVariantId);
+                    s_opposingControllerId = opposingPlayer.GetPlayerId();
+                    InjectOnePet(gameState, nextEntityId++, s_opposingControllerId, OpposingPetVariantId);
                 }
             }
         }
@@ -248,7 +267,45 @@ namespace HsMod
             }
         }
 
-        private static bool AddEntityCardToZoneCosmetic(GameState gameState, int entityId, int variantId)
+        private static bool IsInjectedEntityMissing(GameState gameState)
+        {
+            Map<int, Entity> entityMap = gameState.GetEntityMap();
+            if (entityMap == null)
+            {
+                return true;
+            }
+
+            if (FriendlyPetVariantId >= 0 && s_friendlyEntityId > 0 && !entityMap.ContainsKey(s_friendlyEntityId))
+            {
+                return true;
+            }
+
+            if (OpposingPetVariantId >= 0 && s_opposingEntityId > 0 && !entityMap.ContainsKey(s_opposingEntityId))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool GetLoadCardCalled(Player.Side side)
+        {
+            return side == Player.Side.FRIENDLY ? s_friendlyLoadCardCalled : s_opposingLoadCardCalled;
+        }
+
+        private static void SetLoadCardCalled(Player.Side side, bool value)
+        {
+            if (side == Player.Side.FRIENDLY)
+            {
+                s_friendlyLoadCardCalled = value;
+            }
+            else
+            {
+                s_opposingLoadCardCalled = value;
+            }
+        }
+
+        private static bool AddEntityCardToZoneCosmetic(GameState gameState, int entityId, int variantId, Player.Side side)
         {
             try
             {
@@ -258,9 +315,9 @@ namespace HsMod
                     return false;
                 }
 
-                if (!s_loadCardCalled)
+                if (!GetLoadCardCalled(side))
                 {
-                    s_loadCardCalled = true;
+                    SetLoadCardCalled(side, true);
 
                     if (string.IsNullOrEmpty(entity.GetCardId()))
                     {
@@ -277,7 +334,7 @@ namespace HsMod
                     string cardId = entity.GetCardId();
                     typeof(Entity).GetMethod("InitCard", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.Invoke(entity, null);
 
-                    ZoneCosmetic zoneCosmetic = ZoneMgr.Get()?.FindZoneOfType<ZoneCosmetic>(Player.Side.FRIENDLY);
+                    ZoneCosmetic zoneCosmetic = ZoneMgr.Get()?.FindZoneOfType<ZoneCosmetic>(side);
                     if (zoneCosmetic == null)
                     {
                         return false;
@@ -325,20 +382,20 @@ namespace HsMod
                     }
                 }
 
-                ZoneCosmetic friendlyZone = ZoneMgr.Get()?.FindZoneOfType<ZoneCosmetic>(Player.Side.FRIENDLY);
-                if (friendlyZone == null)
+                ZoneCosmetic targetZone = ZoneMgr.Get()?.FindZoneOfType<ZoneCosmetic>(side);
+                if (targetZone == null)
                 {
                     return false;
                 }
 
                 s_updatingLayout = true;
-                friendlyZone.UpdateLayout();
+                targetZone.UpdateLayout();
                 s_updatingLayout = false;
 
                 actor.UpdatePetComponents();
                 actor.m_petController?.CreatePetObject();
 
-                Log("Pet card added to ZoneCosmetic successfully.");
+                Log($"{side} pet card added to ZoneCosmetic successfully.");
                 return true;
             }
             catch (Exception ex)
