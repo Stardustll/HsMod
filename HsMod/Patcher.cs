@@ -2218,6 +2218,7 @@ namespace HsMod
         {
             private static readonly FieldInfo s_cornerReplacementSpellsField = typeof(CornerSpellReplacementManager).GetField("m_cornerReplacementSpells", BindingFlags.Instance | BindingFlags.NonPublic);
             private static readonly FieldInfo s_petCornerSideField = typeof(PetCorner).GetField("m_side", BindingFlags.Instance | BindingFlags.NonPublic);
+            private static readonly MethodInfo s_updateRootObjectSpellComponentsMethod = typeof(Actor).GetMethod("UpdateRootObjectSpellComponents", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
             [HarmonyPrefix]
             [HarmonyPatch(typeof(CornerSpellReplacementManager), "UpdateCornerReplacements")]
@@ -2445,6 +2446,30 @@ namespace HsMod
                 Actor actor = petController.GetComponentInParent<Actor>();
                 actor?.UpdatePetComponents();
                 petController.CreatePetObject();
+                RefreshHeroWeaponSockets(Player.Side.OPPOSING);
+            }
+
+            private static void RefreshHeroWeaponSockets(Player.Side side)
+            {
+                try
+                {
+                    Card heroCard = GameState.Get()?.GetPlayerBySide(side)?.GetHeroCard();
+                    Actor heroActor = heroCard?.GetActor();
+                    Entity heroEntity = heroCard?.GetEntity();
+                    if (heroActor == null || heroEntity == null)
+                    {
+                        return;
+                    }
+
+                    heroActor.SetCard(heroCard);
+                    heroActor.SetCardDefFromEntity(heroEntity);
+                    heroActor.SetEntity(heroEntity);
+                    s_updateRootObjectSpellComponentsMethod?.Invoke(heroActor, null);
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
+                }
             }
 
             private static void RefreshOpposingPetBodiesInScene()
@@ -2755,6 +2780,53 @@ namespace HsMod
             }
 
             //刷新卡牌画面，解决进化、退化异常
+            private static void RefreshWeaponVisualState(Card card)
+            {
+                try
+                {
+                    Entity entity = card?.GetEntity();
+                    if (card == null || entity == null || entity.GetCardType() != TAG_CARDTYPE.WEAPON)
+                    {
+                        return;
+                    }
+
+                    TAG_ZONE zone = entity.GetZone();
+                    if (zone != TAG_ZONE.PLAY && zone != TAG_ZONE.HAND)
+                    {
+                        return;
+                    }
+
+                    typeof(Card).GetProperty("IsBeingDragged", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.SetValue(card, false);
+                    card.SetDoNotSort(false);
+                    card.SetDoNotWarpToNewZone(false);
+                    card.SetUsesTransformPositionForBigCard(false);
+
+                    int zonePosition = card.GetZonePosition();
+                    if (zonePosition >= 0)
+                    {
+                        card.SetPredictedZonePosition(zonePosition);
+                        card.SetZonePosition(zonePosition);
+                    }
+
+                    Actor actor = card.GetActor();
+                    actor?.SetCard(card);
+                    actor?.SetCardDefFromEntity(entity);
+                    actor?.SetEntity(entity);
+                    actor?.UpdateAllComponents();
+
+                    ZoneWeapon weaponZone = GameState.Get()?.GetPlayerBySide(card.GetControllerSide())?.GetWeaponZone();
+                    if (weaponZone != null)
+                    {
+                        weaponZone.DirtyLayout();
+                        weaponZone.UpdateLayout();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
+                }
+            }
+
             [HarmonyPrefix]
             [HarmonyPatch(typeof(Card), "RefreshActor")]
             public static void RefreshActor(Card __instance)
@@ -2762,12 +2834,19 @@ namespace HsMod
                 try
                 {
                     // Todo: 添加更细致化的判断条件。
-                    if ((__instance?.GetEntity()?.GetZone() == TAG_ZONE.PLAY) || (__instance?.GetEntity()?.GetZone() == TAG_ZONE.HAND))
+                    Entity entity = __instance?.GetEntity();
+                    TAG_ZONE? zone = entity?.GetZone();
+                    if (zone == TAG_ZONE.PLAY || zone == TAG_ZONE.HAND)
                     {
-                        __instance?.GetActor()?.SetCard(__instance);
-                        __instance?.GetActor()?.SetCardDefFromEntity(__instance.GetEntity());
-                        __instance?.GetActor()?.SetEntity(__instance.GetEntity());
-                        __instance?.GetActor()?.UpdateAllComponents();
+                        Actor actor = __instance?.GetActor();
+                        actor?.SetCard(__instance);
+                        if (entity != null)
+                        {
+                            actor?.SetCardDefFromEntity(entity);
+                            actor?.SetEntity(entity);
+                        }
+                        actor?.UpdateAllComponents();
+                        RefreshWeaponVisualState(__instance);
                     }
                     //if (__instance?.GetEntity()?.GetCard()?.GetControllerSide() == Player.Side.FRIENDLY)
                     //{
@@ -2796,6 +2875,19 @@ namespace HsMod
                 }
             }
 
+            [HarmonyPostfix]
+            [HarmonyPatch(typeof(Card), "OnZoneChanged")]
+            private static void PatchCardOnZoneChanged(Card __instance)
+            {
+                RefreshWeaponVisualState(__instance);
+            }
+
+            [HarmonyPostfix]
+            [HarmonyPatch(typeof(Card), "TransitionToZone")]
+            private static void PatchCardTransitionToZone(Card __instance)
+            {
+                RefreshWeaponVisualState(__instance);
+            }
 
             //判断存在异画是否存在，缓解异画问题 Signature frame for RLK_Prologue_RLK_653 not found.
             //private static readonly MethodInfo getSignatureActor = typeof(ActorNames).GetMethod("GetSignatureActor", BindingFlags.Instance | BindingFlags.NonPublic);
