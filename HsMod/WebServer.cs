@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using static HsMod.PluginConfig;
 
@@ -28,9 +29,20 @@ namespace HsMod
         private const string FBIGAME_OSS = "https://fbigame.oss-cn-beijing.aliyuncs.com/";
         private const string FBIGAME_PAGE = "https://fbigame.com/card";
         private const string FBIGAME_SEARCH = "https://fbigame.com/card/search";
+        private const string HEARTHSTONE_JSON_IMAGE = "https://art.hearthstonejson.com/v1/256x/";
         private static string SkinImageCacheFile => Path.Combine(BepInEx.Paths.ConfigPath, "HsSkinImages.json");
+        private static string SkinImageCacheDirectory => Path.Combine(BepInEx.Paths.ConfigPath, "HsSkinImages");
+        private static readonly string[] SkinImageExtensions = { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp" };
+        private static readonly SemaphoreSlim skinImageCacheLoadSemaphore = new SemaphoreSlim(1, 1);
         public static bool pluginConfigLock;
         public static bool updateLock;
+
+        private sealed class SkinImageDownloadResult
+        {
+            public byte[] ImageBytes;
+            public string ContentType;
+            public string Extension;
+        }
 
         public static void Restart()
         {
@@ -78,7 +90,7 @@ namespace HsMod
         {
             var request = context.Request;
             context.Response.StatusCode = 200;
-            string rawUrLower = request.RawUrl.ToLower();
+            string rawUrLower = (request.Url != null ? request.Url.AbsolutePath : request.RawUrl).ToLowerInvariant();
 
             Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"{request.RemoteEndPoint.ToString()} => {request.RawUrl}");
             Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"{DateTime.Now.ToString("yyyy/MM/dd_HH:mm:ss")} {request.Url}");
@@ -288,6 +300,10 @@ namespace HsMod
                     }
                 }
             }
+            else if (rawUrLower == "/skinimage")
+            {
+                await HandleSkinImageRequestAsync(context);
+            }
             else
             {
                 context.Response.ContentType = DetermineContentType(rawUrLower);
@@ -320,6 +336,8 @@ namespace HsMod
         {
             if (rawUrl.EndsWith(".js"))
                 return "text/javascript; charset=UTF-8";
+            if (rawUrl.EndsWith(".webp"))
+                return "image/webp";
             if (rawUrl.EndsWith(".jpg") || rawUrl.EndsWith(".jpeg") || rawUrl == "/safeimg")
                 return "image/jpeg";
             if (rawUrl.EndsWith(".txt") || rawUrl.EndsWith(".log") || rawUrl.EndsWith(".cfg"))
@@ -353,6 +371,251 @@ namespace HsMod
                 return false;
             }
             return false;
+        }
+
+        private static async Task HandleSkinImageRequestAsync(HttpListenerContext context)
+        {
+            var request = context.Request;
+            string dbfId = (request.QueryString["id"] ?? request.QueryString["dbfid"] ?? string.Empty).Trim();
+            string cardStringId = (request.QueryString["cardStringId"] ?? request.QueryString["cardid"] ?? request.QueryString["card_id"] ?? string.Empty).Trim();
+
+            if (string.IsNullOrEmpty(dbfId) && string.IsNullOrEmpty(cardStringId))
+            {
+                context.Response.StatusCode = 400;
+                context.Response.ContentType = "text/plain; charset=UTF-8";
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteAsync("Missing image id.");
+                }
+                return;
+            }
+
+            string localPath = FindLocalSkinImagePath(dbfId, cardStringId);
+            if (!string.IsNullOrEmpty(localPath))
+            {
+                await WriteSkinImageFileAsync(context, localPath);
+                return;
+            }
+
+            string remoteUrl = await ResolveSkinImageRemoteUrlAsync(dbfId, cardStringId);
+            SkinImageDownloadResult downloadResult = await TryDownloadSkinImageAsync(remoteUrl);
+            if (downloadResult != null)
+            {
+                TrySaveSkinImageToFile(dbfId, cardStringId, downloadResult.Extension, downloadResult.ImageBytes);
+                context.Response.ContentType = !string.IsNullOrEmpty(downloadResult.ContentType) ? downloadResult.ContentType : GetMimeType(downloadResult.Extension);
+                await context.Response.OutputStream.WriteAsync(downloadResult.ImageBytes, 0, downloadResult.ImageBytes.Length);
+                return;
+            }
+
+            string fallbackUrl = GetHearthstoneJsonImageUrl(cardStringId);
+            if (!string.IsNullOrEmpty(fallbackUrl)
+                && !string.Equals(remoteUrl, fallbackUrl, StringComparison.OrdinalIgnoreCase)
+                && (downloadResult = await TryDownloadSkinImageAsync(fallbackUrl)) != null)
+            {
+                TrySaveSkinImageToFile(dbfId, cardStringId, downloadResult.Extension, downloadResult.ImageBytes);
+                context.Response.ContentType = !string.IsNullOrEmpty(downloadResult.ContentType) ? downloadResult.ContentType : GetMimeType(downloadResult.Extension);
+                await context.Response.OutputStream.WriteAsync(downloadResult.ImageBytes, 0, downloadResult.ImageBytes.Length);
+                return;
+            }
+
+            context.Response.StatusCode = 404;
+            context.Response.ContentType = "text/plain; charset=UTF-8";
+            using (var writer = new StreamWriter(context.Response.OutputStream))
+            {
+                await writer.WriteAsync("Skin image not found.");
+            }
+        }
+
+        private static async Task WriteSkinImageFileAsync(HttpListenerContext context, string filePath)
+        {
+            context.Response.ContentType = GetMimeType(Path.GetExtension(filePath));
+            byte[] file = await File.ReadAllBytesAsync(filePath);
+            await context.Response.OutputStream.WriteAsync(file, 0, file.Length);
+        }
+
+        private static string FindLocalSkinImagePath(string dbfId, string cardStringId)
+        {
+            foreach (string cacheKey in GetSkinImageCacheKeys(dbfId, cardStringId))
+            {
+                foreach (string extension in SkinImageExtensions)
+                {
+                    string filePath = Path.Combine(SkinImageCacheDirectory, cacheKey + extension);
+                    if (File.Exists(filePath))
+                        return filePath;
+                }
+            }
+            return string.Empty;
+        }
+
+        private static IEnumerable<string> GetSkinImageCacheKeys(string dbfId, string cardStringId)
+        {
+            var keys = new List<string>();
+            string normalizedDbfId = NormalizeSkinImageCacheKey(dbfId);
+            string normalizedCardStringId = NormalizeSkinImageCacheKey(cardStringId);
+
+            if (!string.IsNullOrEmpty(normalizedDbfId))
+                keys.Add(normalizedDbfId);
+            if (!string.IsNullOrEmpty(normalizedCardStringId) && !keys.Contains(normalizedCardStringId))
+                keys.Add(normalizedCardStringId);
+
+            return keys;
+        }
+
+        private static string NormalizeSkinImageCacheKey(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            string normalized = value.Trim();
+            foreach (char invalidChar in Path.GetInvalidFileNameChars())
+                normalized = normalized.Replace(invalidChar, '_');
+            return normalized;
+        }
+
+        private static string GetPrimarySkinImageCacheKey(string dbfId, string cardStringId)
+        {
+            foreach (string cacheKey in GetSkinImageCacheKeys(dbfId, cardStringId))
+                return cacheKey;
+            return string.Empty;
+        }
+
+        private static async Task<string> ResolveSkinImageRemoteUrlAsync(string dbfId, string cardStringId)
+        {
+            if (!string.IsNullOrEmpty(dbfId))
+            {
+                await EnsureSkinImageCacheLoadedAsync();
+                if (skinImageCache.TryGetValue(dbfId, out string remoteUrl) && !string.IsNullOrEmpty(remoteUrl))
+                    return remoteUrl;
+            }
+
+            return GetHearthstoneJsonImageUrl(cardStringId);
+        }
+
+        private static string GetHearthstoneJsonImageUrl(string cardStringId)
+        {
+            return string.IsNullOrEmpty(cardStringId) ? string.Empty : HEARTHSTONE_JSON_IMAGE + cardStringId + ".jpg";
+        }
+
+        private static async Task<SkinImageDownloadResult> TryDownloadSkinImageAsync(string imageUrl)
+        {
+            if (string.IsNullOrEmpty(imageUrl))
+                return null;
+
+            try
+            {
+                using (var client = new HttpClient())
+                {
+                    client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+                    using (var response = await client.GetAsync(imageUrl))
+                    {
+                        if (!response.IsSuccessStatusCode)
+                            return null;
+
+                        byte[] imageBytes = await response.Content.ReadAsByteArrayAsync();
+                        if (imageBytes == null || imageBytes.Length == 0)
+                            return null;
+
+                        string contentType = response.Content.Headers.ContentType != null
+                            ? response.Content.Headers.ContentType.MediaType
+                            : string.Empty;
+                        return new SkinImageDownloadResult
+                        {
+                            ImageBytes = imageBytes,
+                            ContentType = contentType,
+                            Extension = GetSkinImageExtension(imageUrl, contentType)
+                        };
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"DownloadSkinImage error: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static string GetSkinImageExtension(string imageUrl, string contentType)
+        {
+            if (!string.IsNullOrEmpty(contentType))
+            {
+                switch (contentType.ToLowerInvariant())
+                {
+                    case "image/png":
+                        return ".png";
+                    case "image/gif":
+                        return ".gif";
+                    case "image/bmp":
+                        return ".bmp";
+                    case "image/webp":
+                        return ".webp";
+                    case "image/jpeg":
+                    case "image/jpg":
+                        return ".jpg";
+                }
+            }
+
+            try
+            {
+                string imagePath = new Uri(imageUrl).AbsolutePath;
+                string extension = Path.GetExtension(imagePath);
+                if (!string.IsNullOrEmpty(extension) && SkinImageExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+                    return extension.ToLowerInvariant();
+            }
+            catch
+            {
+            }
+
+            return ".jpg";
+        }
+
+        private static void TrySaveSkinImageToFile(string dbfId, string cardStringId, string extension, byte[] imageBytes)
+        {
+            try
+            {
+                string cacheKey = GetPrimarySkinImageCacheKey(dbfId, cardStringId);
+                if (string.IsNullOrEmpty(cacheKey) || imageBytes == null || imageBytes.Length == 0)
+                    return;
+
+                Directory.CreateDirectory(SkinImageCacheDirectory);
+                string finalExtension = string.IsNullOrEmpty(extension) ? ".jpg" : extension.ToLowerInvariant();
+                string targetPath = Path.Combine(SkinImageCacheDirectory, cacheKey + finalExtension);
+
+                if (!File.Exists(targetPath))
+                    File.WriteAllBytes(targetPath, imageBytes);
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"SaveSkinImageFile error: {ex.Message}");
+            }
+        }
+
+        private static async Task EnsureSkinImageCacheLoadedAsync()
+        {
+            if (skinImageCacheLoaded)
+                return;
+
+            await skinImageCacheLoadSemaphore.WaitAsync();
+            try
+            {
+                if (skinImageCacheLoaded)
+                    return;
+
+                if (LoadSkinImageCacheFromFile())
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Info, $"SkinImageCache loaded from file: {skinImageCache.Count} entries");
+                }
+                else
+                {
+                    await FetchSkinImagesFromFbigame();
+                    SaveSkinImageCacheToFile();
+                }
+
+                skinImageCacheLoaded = true;
+            }
+            finally
+            {
+                skinImageCacheLoadSemaphore.Release();
+            }
         }
 
         /// <summary>
@@ -458,23 +721,7 @@ namespace HsMod
         /// </summary>
         private static async Task<string> GetSkinImagesJson()
         {
-            if (!skinImageCacheLoaded)
-            {
-                // 1. 优先从本地文件加载
-                if (LoadSkinImageCacheFromFile())
-                {
-                    skinImageCacheLoaded = true;
-                    Utils.MyLogger(BepInEx.Logging.LogLevel.Info, $"SkinImageCache loaded from file: {skinImageCache.Count} entries");
-                }
-                else
-                {
-                    // 2. 本地无缓存，从 fbigame 获取
-                    await FetchSkinImagesFromFbigame();
-                    skinImageCacheLoaded = true;
-                    // 3. 保存到本地
-                    SaveSkinImageCacheToFile();
-                }
-            }
+            await EnsureSkinImageCacheLoadedAsync();
             return Newtonsoft.Json.JsonConvert.SerializeObject(skinImageCache);
         }
 
@@ -578,6 +825,7 @@ namespace HsMod
                 { ".jpeg", "image/jpeg" },
                 { ".png", "image/png" },
                 { ".gif", "image/gif" },
+                { ".webp", "image/webp" },
                 { ".svg", "image/svg+xml" },
                 { ".bmp", "image/bmp" },
                 { ".mp3", "audio/mpeg" },
