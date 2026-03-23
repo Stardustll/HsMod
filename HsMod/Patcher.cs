@@ -28,6 +28,22 @@ namespace HsMod
         public static List<Harmony> AllHarmony = new List<Harmony>();    //保存补丁信息，方便定向卸载。
         public static List<string> AllHarmonyName = new List<string>();
 
+        private static float ResolveTimeGearScale(float gearValue)
+        {
+            float timeScale = 1f;
+            if (gearValue > 1f) timeScale = gearValue;
+            else if (gearValue < -1f) timeScale = -1f / gearValue;
+            if (timeScale > 8f) timeScale = 8f;
+            if (timeScale < 0.125f) timeScale = 0.125f;
+            return timeScale;
+        }
+
+        private static void ShowTimeGearScaleStatus()
+        {
+            float currentScale = isTimeGearEnable.Value ? ResolveTimeGearScale(timeGear.Value) : 1f;
+            UIStatus.Get()?.AddInfo($"当前倍速：x{currentScale:0.###}", 3f);
+        }
+
         public static void LoadPatch(Type loadType)
         {
             try
@@ -95,6 +111,7 @@ namespace HsMod
             timeGear.SettingChanged += delegate
             {
                 TimeScaleMgr.Get().Update();
+                ShowTimeGearScaleStatus();
             };
 
             isShowCardLargeCount.SettingChanged += delegate
