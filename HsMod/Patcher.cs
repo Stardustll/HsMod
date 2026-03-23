@@ -627,6 +627,43 @@ namespace HsMod
                 }
             }
 
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PurchaseManager), "PurchaseProduct", new Type[]
+            {
+                typeof(Hearthstone.DataModels.ProductDataModel),
+                typeof(Hearthstone.DataModels.PriceDataModel),
+                typeof(PurchaseManager.PurchaseManagerOptions)
+            })]
+            public static bool PatchPurchaseManagerPurchaseProductWithOptions(Hearthstone.DataModels.ProductDataModel product, Hearthstone.DataModels.PriceDataModel price)
+            {
+                return !Utils.TryHandleZeroDollarShoppingPanelPurchase(product, price, 1);
+            }
+
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PurchaseManager), "PurchaseProduct", new Type[]
+            {
+                typeof(Hearthstone.DataModels.ProductDataModel),
+                typeof(Hearthstone.DataModels.PriceDataModel),
+                typeof(int)
+            })]
+            public static bool PatchPurchaseManagerPurchaseProductWithQuantity(Hearthstone.DataModels.ProductDataModel product, Hearthstone.DataModels.PriceDataModel price, int quantity)
+            {
+                return !Utils.TryHandleZeroDollarShoppingPanelPurchase(product, price, quantity);
+            }
+
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PurchaseManager), "PurchaseProduct", new Type[]
+            {
+                typeof(Hearthstone.DataModels.ProductDataModel),
+                typeof(Hearthstone.DataModels.PriceDataModel),
+                typeof(int),
+                typeof(PurchaseManager.PurchaseManagerOptions)
+            })]
+            public static bool PatchPurchaseManagerPurchaseProductWithQuantityAndOptions(Hearthstone.DataModels.ProductDataModel product, Hearthstone.DataModels.PriceDataModel price, int quantity)
+            {
+                return !Utils.TryHandleZeroDollarShoppingPanelPurchase(product, price, quantity);
+            }
+
             //处理置换
             [HarmonyPostfix]
             [HarmonyPatch(typeof(RedundantNDEPopup), "Show")]
