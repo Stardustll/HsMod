@@ -22,7 +22,6 @@ namespace HsMod
         private static readonly Dictionary<long, ZeroDollarShoppingCandidate> _zeroDollarShoppingCandidateMap = new Dictionary<long, ZeroDollarShoppingCandidate>();
         private static int _zeroDollarShoppingSelectedIndex;
         private static bool _zeroDollarShoppingPanelModeActive;
-        private static Hearthstone.DataModels.ProductDataModel _zeroDollarShoppingPanelProductData;
 
         private sealed class ZeroDollarShoppingCandidate
         {
@@ -830,9 +829,7 @@ namespace HsMod
                                 bundleId,
                                 selectedBundle?.Title,
                                 selectedBundle?.Description,
-                                t,
                                 CurrencyType.GOLD,
-                                true,
                                 () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, CurrencyType.GOLD, 1))))
                             {
                                 foundAny = true;
@@ -875,9 +872,7 @@ namespace HsMod
                                     bundleId,
                                     selectedBundle?.Title,
                                     selectedBundle?.Description,
-                                    t,
                                     selectedCurrency,
-                                    true,
                                     () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1))))
                                 {
                                     foundAny = true;
@@ -941,9 +936,7 @@ namespace HsMod
                                     bundleId,
                                     selectedBundle?.Title,
                                     selectedBundle?.Description,
-                                    t,
                                     selectedCurrency,
-                                    false,
                                     () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1))))
                                 {
                                     foundAny = true;
@@ -980,9 +973,7 @@ namespace HsMod
                                     bundleId,
                                     selectedBundle?.Title,
                                     selectedBundle?.Description,
-                                    t,
                                     selectedCurrency,
-                                    false,
                                     () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1))))
                                 {
                                     foundAny = true;
@@ -1028,9 +1019,7 @@ namespace HsMod
             long bundleId,
             string title,
             string description,
-            ProductType productType,
             CurrencyType currencyType,
-            bool useFilteredBundleSet,
             Action purchaseAction)
         {
             if (!candidateBundleIds.Add(bundleId))
@@ -1048,7 +1037,7 @@ namespace HsMod
                 CurrencyType = currencyType,
                 PurchaseAction = purchaseAction
             });
-            Utils.MyLogger(LogLevel.Warning, $"ZeroDollar Candidate [{productType}][{useFilteredBundleSet}] id={bundleId} title={normalizedTitle} currency={currencyType}");
+            Utils.MyLogger(LogLevel.Warning, $"ZeroDollar Candidate id={bundleId} title={normalizedTitle} currency={currencyType}");
             return true;
         }
 
@@ -1066,8 +1055,8 @@ namespace HsMod
             }
 
             _zeroDollarShoppingSelectedIndex = Mathf.Clamp(_zeroDollarShoppingSelectedIndex, 0, _zeroDollarShoppingCandidates.Count - 1);
-            _zeroDollarShoppingPanelProductData = BuildZeroDollarShoppingPanelProductData();
-            if (_zeroDollarShoppingPanelProductData == null)
+            var panelProductData = BuildZeroDollarShoppingPanelProductData();
+            if (panelProductData == null)
             {
                 UIStatus.Get().AddInfo("构建零元购面板数据失败。");
                 return;
@@ -1083,19 +1072,7 @@ namespace HsMod
                     return;
                 }
 
-                if (Plugin.Instance != null)
-                {
-                    Plugin.Instance.StartCoroutine(OpenZeroDollarShoppingPanelWhenReady(_zeroDollarShoppingPanelProductData, _zeroDollarShoppingSelectedIndex));
-                }
-                else
-                {
-                    var shop = Shop.Get();
-                    var variants = _zeroDollarShoppingPanelProductData?.Variants;
-                    var selectedVariant = (variants != null && variants.Count > 0)
-                        ? variants[Mathf.Clamp(_zeroDollarShoppingSelectedIndex, 0, variants.Count - 1)]
-                        : null;
-                    shop?.ProductPageController?.OpenProductPage(_zeroDollarShoppingPanelProductData, selectedVariant);
-                }
+                Plugin.Instance.StartCoroutine(OpenZeroDollarShoppingPanelWhenReady(panelProductData, _zeroDollarShoppingSelectedIndex));
             }, false);
         }
 
@@ -1343,7 +1320,6 @@ namespace HsMod
         private static void CleanupZeroDollarShoppingPanelState(bool clearCandidates)
         {
             _zeroDollarShoppingPanelModeActive = false;
-            _zeroDollarShoppingPanelProductData = null;
 
             if (clearCandidates)
             {
@@ -1355,8 +1331,8 @@ namespace HsMod
 
         public static bool TryHandleZeroDollarShoppingPanelPurchase(
             Hearthstone.DataModels.ProductDataModel product,
-            Hearthstone.DataModels.PriceDataModel price,
-            int quantity)
+            Hearthstone.DataModels.PriceDataModel _price,
+            int _quantity)
         {
             if (!_zeroDollarShoppingPanelModeActive || product == null)
             {
