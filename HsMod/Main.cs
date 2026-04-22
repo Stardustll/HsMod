@@ -1,6 +1,8 @@
 ﻿using BepInEx;
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
+using System.Threading.Tasks;
 using UnityEngine;
 using static HsMod.PluginConfig;
 
@@ -174,6 +176,8 @@ namespace HsMod
 
         private void Update()
         {
+            MainThreadDispatcher.Pump();
+
             // todo: check game status
             if ((autoQuitTimer.Value > 0) && (ConfigValue.Get().RunningTime >= (autoQuitTimer.Value + 1818)))
             {
@@ -406,6 +410,56 @@ namespace HsMod
             // PatchManager.UnPatchAll();
         }
 
+    }
+
+    internal static class MainThreadDispatcher
+    {
+        private static readonly ConcurrentQueue<Action> PendingActions = new ConcurrentQueue<Action>();
+
+        public static Task<T> EnqueueAsync<T>(Func<T> action)
+        {
+            var tcs = new TaskCompletionSource<T>();
+            PendingActions.Enqueue(() =>
+            {
+                try
+                {
+                    tcs.TrySetResult(action());
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+            return tcs.Task;
+        }
+
+        public static Task EnqueueAsync(Action action)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            PendingActions.Enqueue(() =>
+            {
+                try
+                {
+                    action();
+                    tcs.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+            return tcs.Task;
+        }
+
+        public static void Pump(int maxActionsPerFrame = 8)
+        {
+            int processed = 0;
+            while (processed < maxActionsPerFrame && PendingActions.TryDequeue(out Action action))
+            {
+                processed++;
+                action();
+            }
+        }
     }
 
 }
