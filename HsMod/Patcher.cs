@@ -28,6 +28,22 @@ namespace HsMod
         public static List<Harmony> AllHarmony = new List<Harmony>();    //保存补丁信息，方便定向卸载。
         public static List<string> AllHarmonyName = new List<string>();
 
+        private static float ResolveTimeGearScale(float gearValue)
+        {
+            float timeScale = 1f;
+            if (gearValue > 1f) timeScale = gearValue;
+            else if (gearValue < -1f) timeScale = -1f / gearValue;
+            if (timeScale > 8f) timeScale = 8f;
+            if (timeScale < 0.125f) timeScale = 0.125f;
+            return timeScale;
+        }
+
+        private static void ShowTimeGearScaleStatus()
+        {
+            float currentScale = isTimeGearEnable.Value ? ResolveTimeGearScale(timeGear.Value) : 1f;
+            UIStatus.Get()?.AddInfo($"当前倍速：x{currentScale:0.###}", 3f);
+        }
+
         public static void LoadPatch(Type loadType)
         {
             try
@@ -95,6 +111,7 @@ namespace HsMod
             timeGear.SettingChanged += delegate
             {
                 TimeScaleMgr.Get().Update();
+                ShowTimeGearScaleStatus();
             };
 
             isShowCardLargeCount.SettingChanged += delegate
@@ -625,6 +642,43 @@ namespace HsMod
                         ___m_okayButton.TriggerRelease();
                     }
                 }
+            }
+
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PurchaseManager), "PurchaseProduct", new Type[]
+            {
+                typeof(Hearthstone.DataModels.ProductDataModel),
+                typeof(Hearthstone.DataModels.PriceDataModel),
+                typeof(PurchaseManager.PurchaseManagerOptions)
+            })]
+            public static bool PatchPurchaseManagerPurchaseProductWithOptions(Hearthstone.DataModels.ProductDataModel product, Hearthstone.DataModels.PriceDataModel price)
+            {
+                return !Utils.TryHandleZeroDollarShoppingPanelPurchase(product, price, 1);
+            }
+
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PurchaseManager), "PurchaseProduct", new Type[]
+            {
+                typeof(Hearthstone.DataModels.ProductDataModel),
+                typeof(Hearthstone.DataModels.PriceDataModel),
+                typeof(int)
+            })]
+            public static bool PatchPurchaseManagerPurchaseProductWithQuantity(Hearthstone.DataModels.ProductDataModel product, Hearthstone.DataModels.PriceDataModel price, int quantity)
+            {
+                return !Utils.TryHandleZeroDollarShoppingPanelPurchase(product, price, quantity);
+            }
+
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PurchaseManager), "PurchaseProduct", new Type[]
+            {
+                typeof(Hearthstone.DataModels.ProductDataModel),
+                typeof(Hearthstone.DataModels.PriceDataModel),
+                typeof(int),
+                typeof(PurchaseManager.PurchaseManagerOptions)
+            })]
+            public static bool PatchPurchaseManagerPurchaseProductWithQuantityAndOptions(Hearthstone.DataModels.ProductDataModel product, Hearthstone.DataModels.PriceDataModel price, int quantity)
+            {
+                return !Utils.TryHandleZeroDollarShoppingPanelPurchase(product, price, quantity);
             }
 
             //处理置换
