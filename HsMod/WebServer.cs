@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -7,6 +8,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.UI;
 using static HsMod.PluginConfig;
 
 namespace HsMod
@@ -38,8 +40,31 @@ namespace HsMod
             "GetPremiumPortraitRef",
             "GetPortraitRef"
         };
+        private static readonly Type[] AssetLoadTypeCandidates =
+        {
+            typeof(Texture2D),
+            typeof(Sprite),
+            typeof(Material),
+            typeof(GameObject)
+        };
+        private static readonly string[] AssetReferenceMemberHints = { "Asset", "Prefab", "Frame", "Texture", "Sprite", "Material", "Preview", "Thumbnail", "Icon" };
+        private static readonly string[] CardBackMemberHints = { "CardBack", "Texture", "Material", "Frame", "Prefab", "Asset", "Highlight" };
+        private static readonly string[] BattlegroundsBoardMemberHints = { "Board", "Texture", "Prefab", "Asset", "Preview", "Thumbnail", "FullBoard", "FullTavern", "Layout" };
+        private static readonly string[] BattlegroundsFinisherMemberHints = { "Finisher", "Texture", "Prefab", "Asset", "Preview", "Thumbnail", "Material", "Effect" };
         public static bool pluginConfigLock;
         public static bool updateLock;
+
+        private enum SkinImageKind
+        {
+            Card,
+            Pet,
+            CardBack,
+            BgsBoard,
+            BgsFinisher,
+            Board
+        }
+
+        private delegate Texture SkinTextureResolver(int dbfId, out string errorMessage);
 
         private sealed class CardArtExportResult
         {
@@ -341,6 +366,7 @@ namespace HsMod
             string dbfId = (request.QueryString["id"] ?? request.QueryString["dbfid"] ?? string.Empty).Trim();
             string cardStringId = (request.QueryString["cardStringId"] ?? request.QueryString["cardid"] ?? request.QueryString["card_id"] ?? string.Empty).Trim();
             TAG_PREMIUM premium = ParsePremium(request.QueryString["premium"] ?? request.QueryString["quality"]);
+            SkinImageKind kind = ParseSkinImageKind(request.QueryString["type"] ?? request.QueryString["skinType"] ?? request.QueryString["kind"]);
 
             if (string.IsNullOrEmpty(dbfId) && string.IsNullOrEmpty(cardStringId))
             {
@@ -353,14 +379,14 @@ namespace HsMod
                 return;
             }
 
-            string localPath = FindLocalSkinImagePath(dbfId, cardStringId, premium);
+            string localPath = FindLocalSkinImagePath(dbfId, cardStringId, premium, kind);
             if (!string.IsNullOrEmpty(localPath))
             {
                 await WriteSkinImageFileAsync(context, localPath);
                 return;
             }
 
-            CardArtExportResult exportResult = await TryExportCardArtAsync(dbfId, cardStringId, premium);
+            CardArtExportResult exportResult = await TryExportSkinImageAsync(dbfId, cardStringId, premium, kind);
             if (exportResult != null && !string.IsNullOrEmpty(exportResult.FilePath) && File.Exists(exportResult.FilePath))
             {
                 await WriteSkinImageFileAsync(context, exportResult.FilePath);
@@ -417,17 +443,46 @@ namespace HsMod
 
         private static async Task<CardArtExportResult> TryExportCardArtAsync(string dbfId, string cardStringId, TAG_PREMIUM premium)
         {
+            return await TryExportSkinImageAsync(dbfId, cardStringId, premium, SkinImageKind.Card);
+        }
+
+        private static async Task<CardArtExportResult> TryExportSkinImageAsync(string dbfId, string cardStringId, TAG_PREMIUM premium, SkinImageKind kind)
+        {
             try
             {
-                return await MainThreadDispatcher.EnqueueAsync(() => TryExportCardArtOnMainThread(dbfId, cardStringId, premium));
+                return await MainThreadDispatcher.EnqueueAsync(() => TryExportSkinImageOnMainThread(dbfId, cardStringId, premium, kind));
             }
             catch (Exception ex)
             {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ExportCardArtAsync error: {ex.Message}");
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ExportSkinImageAsync error: {ex.Message}");
                 return new CardArtExportResult
                 {
                     ErrorMessage = ex.Message
                 };
+            }
+        }
+
+        private static CardArtExportResult TryExportSkinImageOnMainThread(string dbfId, string cardStringId, TAG_PREMIUM premium, SkinImageKind kind)
+        {
+            switch (kind)
+            {
+                case SkinImageKind.Card:
+                    return TryExportCardArtOnMainThread(dbfId, cardStringId, premium);
+                case SkinImageKind.Pet:
+                    return TryExportPetImageOnMainThread(dbfId, cardStringId, premium);
+                case SkinImageKind.CardBack:
+                    return TryExportDbfSkinImageOnMainThread(dbfId, cardStringId, premium, kind, TryResolveCardBackTexture);
+                case SkinImageKind.BgsBoard:
+                    return TryExportDbfSkinImageOnMainThread(dbfId, cardStringId, premium, kind, TryResolveBattlegroundsBoardTexture);
+                case SkinImageKind.BgsFinisher:
+                    return TryExportDbfSkinImageOnMainThread(dbfId, cardStringId, premium, kind, TryResolveBattlegroundsFinisherTexture);
+                case SkinImageKind.Board:
+                    return new CardArtExportResult
+                    {
+                        ErrorMessage = "Board preview export is not supported."
+                    };
+                default:
+                    return TryExportCardArtOnMainThread(dbfId, cardStringId, premium);
             }
         }
 
@@ -475,6 +530,93 @@ namespace HsMod
             }
         }
 
+        private static CardArtExportResult TryExportPetImageOnMainThread(string dbfId, string cardStringId, TAG_PREMIUM premium)
+        {
+            var result = new CardArtExportResult();
+            try
+            {
+                string resolvedCardId = ResolvePetCardStringId(dbfId, cardStringId);
+                if (string.IsNullOrEmpty(resolvedCardId))
+                {
+                    result.ErrorMessage = "Unable to resolve pet card id.";
+                    return result;
+                }
+
+                string existingPath = FindLocalSkinImagePath(dbfId, resolvedCardId, premium, SkinImageKind.Pet);
+                if (!string.IsNullOrEmpty(existingPath))
+                {
+                    result.FilePath = existingPath;
+                    return result;
+                }
+
+                string cachePath = Path.Combine(SkinImageCacheDirectory, BuildSkinImageCacheKey(SkinImageKind.Pet, dbfId, resolvedCardId, premium) + ".png");
+                Texture texture = TryResolveCardArtTexture(resolvedCardId, premium, out string textureError);
+                if (texture == null)
+                {
+                    result.ErrorMessage = textureError;
+                    return result;
+                }
+
+                if (!Utils.TryWriteTextureToPng(texture, cachePath))
+                {
+                    result.ErrorMessage = "Failed to encode pet texture.";
+                    return result;
+                }
+
+                result.FilePath = cachePath;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ExportPetImage error: {ex.Message}");
+                result.ErrorMessage = ex.Message;
+                return result;
+            }
+        }
+
+        private static CardArtExportResult TryExportDbfSkinImageOnMainThread(string dbfId, string cardStringId, TAG_PREMIUM premium, SkinImageKind kind, SkinTextureResolver resolver)
+        {
+            var result = new CardArtExportResult();
+            try
+            {
+                if (!int.TryParse(dbfId, out int parsedId))
+                {
+                    result.ErrorMessage = "Invalid skin id.";
+                    return result;
+                }
+
+                string existingPath = FindLocalSkinImagePath(dbfId, cardStringId, premium, kind);
+                if (!string.IsNullOrEmpty(existingPath))
+                {
+                    result.FilePath = existingPath;
+                    return result;
+                }
+
+                string cachePath = Path.Combine(SkinImageCacheDirectory, BuildSkinImageCacheKey(kind, dbfId, cardStringId, premium) + ".png");
+                Texture texture = resolver(parsedId, out string textureError);
+                if (texture == null)
+                {
+                    result.ErrorMessage = textureError;
+                    return result;
+                }
+
+                if (!Utils.TryWriteTextureToPng(texture, cachePath))
+                {
+                    result.ErrorMessage = "Failed to encode skin image texture.";
+                    return result;
+                }
+
+                result.FilePath = cachePath;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ExportDbfSkinImage error: {ex.Message}");
+                result.ErrorMessage = ex.Message;
+                return result;
+            }
+        }
+
         private static TAG_PREMIUM ParsePremium(string rawPremium)
         {
             if (string.IsNullOrWhiteSpace(rawPremium))
@@ -498,6 +640,35 @@ namespace HsMod
             }
         }
 
+        private static SkinImageKind ParseSkinImageKind(string rawKind)
+        {
+            if (string.IsNullOrWhiteSpace(rawKind))
+                return SkinImageKind.Card;
+
+            string normalized = rawKind.Trim().ToLowerInvariant();
+            switch (normalized)
+            {
+                case "pet":
+                case "opposingpet":
+                    return SkinImageKind.Pet;
+                case "cardback":
+                    return SkinImageKind.CardBack;
+                case "bgsboard":
+                case "battlegroundboard":
+                case "battlegroundsboard":
+                    return SkinImageKind.BgsBoard;
+                case "bgsfinisher":
+                case "battlegroundfinisher":
+                case "battlegroundsfinisher":
+                case "finisher":
+                    return SkinImageKind.BgsFinisher;
+                case "board":
+                    return SkinImageKind.Board;
+                default:
+                    return SkinImageKind.Card;
+            }
+        }
+
         private static string ResolveCardStringId(string dbfId, string cardStringId)
         {
             if (!string.IsNullOrWhiteSpace(cardStringId))
@@ -518,9 +689,39 @@ namespace HsMod
             return string.Empty;
         }
 
+        private static string ResolvePetCardStringId(string dbfId, string cardStringId)
+        {
+            if (!string.IsNullOrWhiteSpace(cardStringId))
+                return cardStringId.Trim();
+
+            if (!int.TryParse(dbfId, out int variantId))
+                return string.Empty;
+
+            try
+            {
+                PetsManager petsManager = PetsManager.Get();
+                if (petsManager != null)
+                {
+                    int cardDbId;
+                    if (petsManager.TryGetCardIdFromPetVariantId(variantId, out cardDbId))
+                        return GameUtils.TranslateDbIdToCardId(cardDbId, false) ?? string.Empty;
+                }
+
+                PetVariantDbfRecord record = GameDbf.PetVariant.GetRecord(variantId);
+                if (record != null)
+                    return GameUtils.TranslateDbIdToCardId(record.CardId, false) ?? string.Empty;
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ResolvePetCardStringId error: {ex.Message}");
+            }
+
+            return string.Empty;
+        }
+
         private static string FindLocalCardArtPath(string dbfId, string cardStringId, TAG_PREMIUM premium)
         {
-            return FindLocalSkinImagePath(dbfId, cardStringId, premium);
+            return FindLocalSkinImagePath(dbfId, cardStringId, premium, SkinImageKind.Card);
         }
 
         private static string BuildCardArtCacheKey(string dbfId, string cardStringId, TAG_PREMIUM premium)
@@ -610,6 +811,371 @@ namespace HsMod
             {
                 DisposeIfNeeded(disposableCardDef);
             }
+        }
+
+        private static Texture TryResolveCardBackTexture(int dbfId, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            var targets = new List<object>();
+
+            try
+            {
+                object cardBackManager = CardBackManager.Get();
+                object cardBackDataMap = TryGetMemberValue(cardBackManager, "m_cardBackData");
+                object cardBackData = TryGetIndexedValue(cardBackDataMap, dbfId);
+                if (cardBackData != null)
+                    targets.Add(cardBackData);
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryResolveCardBackTexture manager error: {ex.Message}");
+            }
+
+            try
+            {
+                object cardBackRecord = GameDbf.CardBack.GetRecord(dbfId);
+                if (cardBackRecord != null)
+                    targets.Add(cardBackRecord);
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryResolveCardBackTexture record error: {ex.Message}");
+            }
+
+            if (targets.Count == 0)
+            {
+                errorMessage = "Card back record not found.";
+                return null;
+            }
+
+            Texture texture = TryResolveTextureFromSearchTargets(targets, CardBackMemberHints, TAG_PREMIUM.NORMAL, out errorMessage);
+            if (texture != null)
+                return texture;
+
+            if (string.IsNullOrEmpty(errorMessage))
+                errorMessage = "Card back texture not found.";
+            return null;
+        }
+
+        private static Texture TryResolveBattlegroundsBoardTexture(int dbfId, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            var targets = new List<object>();
+
+            try
+            {
+                object boardRecord = GameDbf.BattlegroundsBoardSkin.GetRecord(dbfId);
+                if (boardRecord != null)
+                    targets.Add(boardRecord);
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryResolveBattlegroundsBoardTexture error: {ex.Message}");
+            }
+
+            if (targets.Count == 0)
+            {
+                errorMessage = "Battlegrounds board record not found.";
+                return null;
+            }
+
+            Texture texture = TryResolveTextureFromSearchTargets(targets, BattlegroundsBoardMemberHints, TAG_PREMIUM.NORMAL, out errorMessage);
+            if (texture != null)
+                return texture;
+
+            if (string.IsNullOrEmpty(errorMessage))
+                errorMessage = "Battlegrounds board texture not found.";
+            return null;
+        }
+
+        private static Texture TryResolveBattlegroundsFinisherTexture(int dbfId, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            var targets = new List<object>();
+
+            try
+            {
+                object finisherRecord = GameDbf.BattlegroundsFinisher.GetRecord(dbfId);
+                if (finisherRecord != null)
+                    targets.Add(finisherRecord);
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryResolveBattlegroundsFinisherTexture error: {ex.Message}");
+            }
+
+            if (targets.Count == 0)
+            {
+                errorMessage = "Battlegrounds finisher record not found.";
+                return null;
+            }
+
+            Texture texture = TryResolveTextureFromSearchTargets(targets, BattlegroundsFinisherMemberHints, TAG_PREMIUM.NORMAL, out errorMessage);
+            if (texture != null)
+                return texture;
+
+            if (string.IsNullOrEmpty(errorMessage))
+                errorMessage = "Battlegrounds finisher texture not found.";
+            return null;
+        }
+
+        private static Texture TryResolveTextureFromSearchTargets(IEnumerable<object> targets, string[] memberHints, TAG_PREMIUM premium, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            if (targets == null)
+            {
+                errorMessage = "No search targets.";
+                return null;
+            }
+
+            foreach (object target in targets)
+            {
+                if (target == null)
+                    continue;
+
+                Texture texture = TryExtractTexture(target);
+                if (texture != null)
+                    return texture;
+
+                texture = TryResolveTextureFromNamedMembers(target, memberHints, premium);
+                if (texture != null)
+                    return texture;
+            }
+
+            errorMessage = "No texture-like asset found for the requested skin.";
+            return null;
+        }
+
+        private static Texture TryResolveTextureFromNamedMembers(object target, string[] memberHints, TAG_PREMIUM premium)
+        {
+            if (target == null)
+                return null;
+
+            Type targetType = target.GetType();
+
+            foreach (PropertyInfo property in targetType.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!property.CanRead || property.GetIndexParameters().Length > 0)
+                    continue;
+                if (!ShouldInspectMember(property.Name, property.PropertyType, memberHints))
+                    continue;
+
+                object value;
+                try
+                {
+                    value = property.GetValue(target, null);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                Texture texture = TryExtractTexture(value);
+                if (texture != null)
+                    return texture;
+
+                if (ShouldTryLoadAssetReference(property.Name, value))
+                {
+                    texture = TryLoadTextureFromAssetReference(value);
+                    if (texture != null)
+                        return texture;
+                }
+            }
+
+            foreach (FieldInfo field in targetType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!ShouldInspectMember(field.Name, field.FieldType, memberHints))
+                    continue;
+
+                object value;
+                try
+                {
+                    value = field.GetValue(target);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                Texture texture = TryExtractTexture(value);
+                if (texture != null)
+                    return texture;
+
+                if (ShouldTryLoadAssetReference(field.Name, value))
+                {
+                    texture = TryLoadTextureFromAssetReference(value);
+                    if (texture != null)
+                        return texture;
+                }
+            }
+
+            foreach (MethodInfo method in targetType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (method.IsSpecialName || method.ReturnType == typeof(void))
+                    continue;
+                if (!ShouldInspectMember(method.Name, method.ReturnType, memberHints))
+                    continue;
+
+                object[] arguments = BuildInvocationArguments(method, premium);
+                if (arguments == null || arguments.Length > 2)
+                    continue;
+
+                object returnValue;
+                try
+                {
+                    returnValue = method.Invoke(target, arguments);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                Texture texture = TryExtractTexture(returnValue);
+                if (texture != null)
+                    return texture;
+
+                if (ShouldTryLoadAssetReference(method.Name, returnValue))
+                {
+                    texture = TryLoadTextureFromAssetReference(returnValue);
+                    if (texture != null)
+                        return texture;
+                }
+            }
+
+            return null;
+        }
+
+        private static bool ShouldInspectMember(string memberName, Type memberType, string[] memberHints)
+        {
+            if (ContainsHint(memberName, memberHints))
+                return true;
+
+            if (memberType == null)
+                return false;
+
+            if (typeof(Texture).IsAssignableFrom(memberType)
+                || typeof(Sprite).IsAssignableFrom(memberType)
+                || typeof(Material).IsAssignableFrom(memberType))
+            {
+                return true;
+            }
+
+            return LooksLikeAssetReferenceType(memberType);
+        }
+
+        private static bool ShouldTryLoadAssetReference(string memberName, object value)
+        {
+            if (value == null)
+                return false;
+
+            if (LooksLikeAssetReferenceType(value.GetType()))
+                return true;
+
+            return ContainsHint(memberName, AssetReferenceMemberHints);
+        }
+
+        private static bool LooksLikeAssetReferenceType(Type type)
+        {
+            if (type == null)
+                return false;
+
+            string fullName = type.FullName ?? type.Name ?? string.Empty;
+            return fullName.IndexOf("AssetReference", StringComparison.OrdinalIgnoreCase) >= 0
+                || fullName.IndexOf("AssetRef", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool ContainsHint(string value, IEnumerable<string> hints)
+        {
+            if (string.IsNullOrEmpty(value) || hints == null)
+                return false;
+
+            foreach (string hint in hints)
+            {
+                if (!string.IsNullOrEmpty(hint)
+                    && value.IndexOf(hint, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static object TryGetMemberValue(object target, string memberName)
+        {
+            if (target == null || string.IsNullOrEmpty(memberName))
+                return null;
+
+            Type targetType = target.GetType();
+            FieldInfo field = targetType.GetField(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (field != null)
+                return field.GetValue(target);
+
+            PropertyInfo property = targetType.GetProperty(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (property != null && property.CanRead && property.GetIndexParameters().Length == 0)
+                return property.GetValue(target, null);
+
+            return null;
+        }
+
+        private static object TryGetIndexedValue(object container, int key)
+        {
+            if (container == null)
+                return null;
+
+            if (container is IDictionary dictionary && dictionary.Contains(key))
+                return dictionary[key];
+
+            Type containerType = container.GetType();
+            MethodInfo tryGetValueMethod = containerType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(method =>
+                {
+                    if (!string.Equals(method.Name, "TryGetValue", StringComparison.Ordinal))
+                        return false;
+                    ParameterInfo[] parameters = method.GetParameters();
+                    return parameters.Length == 2 && parameters[1].ParameterType.IsByRef;
+                });
+
+            if (tryGetValueMethod != null)
+            {
+                ParameterInfo[] parameters = tryGetValueMethod.GetParameters();
+                object[] arguments = new object[2];
+                arguments[0] = Convert.ChangeType(key, parameters[0].ParameterType);
+                arguments[1] = parameters[1].ParameterType.GetElementType() != null
+                    ? GetDefaultValue(parameters[1].ParameterType.GetElementType())
+                    : null;
+                object result = tryGetValueMethod.Invoke(container, arguments);
+                if (result is bool found && found)
+                    return arguments[1];
+            }
+
+            PropertyInfo indexer = containerType.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(property =>
+                {
+                    ParameterInfo[] parameters = property.GetIndexParameters();
+                    return property.CanRead && parameters.Length == 1 && parameters[0].ParameterType == typeof(int);
+                });
+
+            if (indexer != null)
+            {
+                try
+                {
+                    return indexer.GetValue(container, new object[] { key });
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            return null;
+        }
+
+        private static object GetDefaultValue(Type type)
+        {
+            if (type == null)
+                return null;
+            return type.IsValueType ? Activator.CreateInstance(type) : null;
         }
 
         private static object ExtractCardDefInstance(object disposableCardDef)
@@ -839,19 +1405,46 @@ namespace HsMod
 
         private static Texture TryExtractTexture(object value)
         {
-            if (value == null)
+            return TryExtractTexture(value, 0);
+        }
+
+        private static Texture TryExtractTexture(object value, int depth)
+        {
+            if (value == null || depth > 4)
                 return null;
 
             if (value is Texture texture)
                 return texture;
 
+            if (value is Sprite sprite)
+                return sprite.texture;
+
+            if (value is Material material)
+                return material.mainTexture;
+
+            if (value is GameObject gameObject)
+                return TryExtractTextureFromGameObject(gameObject, depth + 1);
+
+            if (value is Component component)
+            {
+                Texture componentTexture = TryExtractTextureFromSpecialComponent(component);
+                if (componentTexture != null)
+                    return componentTexture;
+            }
+
             Type valueType = value.GetType();
             PropertyInfo assetProperty = valueType.GetProperty("Asset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (assetProperty != null)
             {
-                Texture assetTexture = TryExtractTexture(assetProperty.GetValue(value, null));
-                if (assetTexture != null)
-                    return assetTexture;
+                try
+                {
+                    Texture assetTexture = TryExtractTexture(assetProperty.GetValue(value, null), depth + 1);
+                    if (assetTexture != null)
+                        return assetTexture;
+                }
+                catch
+                {
+                }
             }
 
             foreach (PropertyInfo property in valueType.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
@@ -860,22 +1453,109 @@ namespace HsMod
                     continue;
                 if (property.GetIndexParameters().Length > 0)
                     continue;
-                if (!typeof(Texture).IsAssignableFrom(property.PropertyType))
+                if (property.Name != "Asset"
+                    && !typeof(Texture).IsAssignableFrom(property.PropertyType)
+                    && !typeof(Sprite).IsAssignableFrom(property.PropertyType)
+                    && !typeof(Material).IsAssignableFrom(property.PropertyType))
                     continue;
 
-                Texture propertyTexture = property.GetValue(value, null) as Texture;
-                if (propertyTexture != null)
-                    return propertyTexture;
+                try
+                {
+                    Texture propertyTexture = TryExtractTexture(property.GetValue(value, null), depth + 1);
+                    if (propertyTexture != null)
+                        return propertyTexture;
+                }
+                catch
+                {
+                }
             }
 
             foreach (FieldInfo field in valueType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
-                if (!typeof(Texture).IsAssignableFrom(field.FieldType))
+                if (field.Name != "Asset"
+                    && !typeof(Texture).IsAssignableFrom(field.FieldType)
+                    && !typeof(Sprite).IsAssignableFrom(field.FieldType)
+                    && !typeof(Material).IsAssignableFrom(field.FieldType))
                     continue;
 
-                Texture fieldTexture = field.GetValue(value) as Texture;
-                if (fieldTexture != null)
-                    return fieldTexture;
+                try
+                {
+                    Texture fieldTexture = TryExtractTexture(field.GetValue(value), depth + 1);
+                    if (fieldTexture != null)
+                        return fieldTexture;
+                }
+                catch
+                {
+                }
+            }
+
+            if (!(value is string) && value is IEnumerable enumerable)
+            {
+                int count = 0;
+                foreach (object item in enumerable)
+                {
+                    Texture itemTexture = TryExtractTexture(item, depth + 1);
+                    if (itemTexture != null)
+                        return itemTexture;
+
+                    count++;
+                    if (count >= 8)
+                        break;
+                }
+            }
+
+            return null;
+        }
+
+        private static Texture TryExtractTextureFromGameObject(GameObject gameObject, int depth)
+        {
+            if (gameObject == null || depth > 4)
+                return null;
+
+            try
+            {
+                foreach (Component component in gameObject.GetComponentsInChildren<Component>(true))
+                {
+                    Texture texture = TryExtractTexture(component, depth + 1);
+                    if (texture != null)
+                        return texture;
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryExtractTextureFromGameObject error: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        private static Texture TryExtractTextureFromSpecialComponent(Component component)
+        {
+            if (component == null)
+                return null;
+
+            if (component is RawImage rawImage && rawImage.texture != null)
+                return rawImage.texture;
+
+            if (component is Image image && image.sprite != null)
+                return image.sprite.texture;
+
+            if (component is SpriteRenderer spriteRenderer && spriteRenderer.sprite != null)
+                return spriteRenderer.sprite.texture;
+
+            if (component is Renderer renderer)
+            {
+                if (renderer.sharedMaterial != null && renderer.sharedMaterial.mainTexture != null)
+                    return renderer.sharedMaterial.mainTexture;
+
+                if (renderer.sharedMaterials != null)
+                {
+                    foreach (Material sharedMaterial in renderer.sharedMaterials)
+                    {
+                        if (sharedMaterial != null && sharedMaterial.mainTexture != null)
+                            return sharedMaterial.mainTexture;
+                    }
+                }
             }
 
             return null;
@@ -903,10 +1583,23 @@ namespace HsMod
                 object loadingOptions = parameters[1].ParameterType.IsEnum
                     ? Activator.CreateInstance(parameters[1].ParameterType)
                     : null;
-                object assetHandle = loadAssetMethod.MakeGenericMethod(typeof(Texture2D))
-                    .Invoke(assetLoader, new[] { assetReference, loadingOptions });
+                foreach (Type assetType in AssetLoadTypeCandidates)
+                {
+                    try
+                    {
+                        object assetHandle = loadAssetMethod.MakeGenericMethod(assetType)
+                            .Invoke(assetLoader, new[] { assetReference, loadingOptions });
 
-                return TryExtractTexture(assetHandle);
+                        Texture texture = TryExtractTexture(assetHandle);
+                        if (texture != null)
+                            return texture;
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                return null;
             }
             catch (Exception ex)
             {
@@ -928,10 +1621,10 @@ namespace HsMod
             await context.Response.OutputStream.WriteAsync(file, 0, file.Length);
         }
 
-        private static string FindLocalSkinImagePath(string dbfId, string cardStringId, TAG_PREMIUM premium)
+        private static string FindLocalSkinImagePath(string dbfId, string cardStringId, TAG_PREMIUM premium, SkinImageKind kind)
         {
-            string resolvedCardId = ResolveCardStringId(dbfId, cardStringId);
-            foreach (string cacheKey in GetSkinImageCacheKeys(dbfId, resolvedCardId, premium))
+            string resolvedCardId = ResolveSkinImageCardId(kind, dbfId, cardStringId);
+            foreach (string cacheKey in GetSkinImageCacheKeys(kind, dbfId, resolvedCardId, premium))
             {
                 foreach (string extension in SkinImageExtensions)
                 {
@@ -941,7 +1634,7 @@ namespace HsMod
                 }
             }
 
-            if (!string.IsNullOrEmpty(resolvedCardId))
+            if ((kind == SkinImageKind.Card || kind == SkinImageKind.Pet) && !string.IsNullOrEmpty(resolvedCardId))
             {
                 string exportedPath = FindExportedCardTextureDownloadPath(resolvedCardId, premium);
                 if (!string.IsNullOrEmpty(exportedPath))
@@ -951,18 +1644,67 @@ namespace HsMod
             return string.Empty;
         }
 
-        private static IEnumerable<string> GetSkinImageCacheKeys(string dbfId, string cardStringId, TAG_PREMIUM premium)
+        private static string ResolveSkinImageCardId(SkinImageKind kind, string dbfId, string cardStringId)
+        {
+            switch (kind)
+            {
+                case SkinImageKind.Card:
+                    return ResolveCardStringId(dbfId, cardStringId);
+                case SkinImageKind.Pet:
+                    return ResolvePetCardStringId(dbfId, cardStringId);
+                default:
+                    return !string.IsNullOrWhiteSpace(cardStringId) ? cardStringId.Trim() : string.Empty;
+            }
+        }
+
+        private static string BuildSkinImageCacheKey(SkinImageKind kind, string dbfId, string cardStringId, TAG_PREMIUM premium)
+        {
+            if (kind == SkinImageKind.Card)
+                return BuildCardArtCacheKey(dbfId, cardStringId, premium);
+
+            string baseKey = !string.IsNullOrWhiteSpace(dbfId) ? dbfId.Trim() : cardStringId.Trim();
+            if (kind == SkinImageKind.Pet && !string.IsNullOrWhiteSpace(cardStringId))
+                baseKey = string.IsNullOrEmpty(baseKey) ? cardStringId.Trim() : baseKey + "-" + cardStringId.Trim();
+            if (string.IsNullOrEmpty(baseKey))
+                baseKey = "unknown";
+
+            foreach (char invalidChar in Path.GetInvalidFileNameChars())
+                baseKey = baseKey.Replace(invalidChar, '_');
+
+            baseKey = kind.ToString().ToLowerInvariant() + "-" + baseKey;
+
+            if (premium != TAG_PREMIUM.NORMAL)
+                baseKey = baseKey + "-" + premium.ToString().ToUpperInvariant();
+
+            return baseKey;
+        }
+
+        private static IEnumerable<string> GetSkinImageCacheKeys(SkinImageKind kind, string dbfId, string cardStringId, TAG_PREMIUM premium)
         {
             var keys = new List<string>();
-            string primaryKey = BuildCardArtCacheKey(dbfId, cardStringId, premium);
+            string primaryKey = BuildSkinImageCacheKey(kind, dbfId, cardStringId, premium);
             if (!string.IsNullOrEmpty(primaryKey))
                 keys.Add(primaryKey);
 
             if (premium != TAG_PREMIUM.NORMAL)
             {
-                string fallbackKey = BuildCardArtCacheKey(dbfId, cardStringId, TAG_PREMIUM.NORMAL);
+                string fallbackKey = BuildSkinImageCacheKey(kind, dbfId, cardStringId, TAG_PREMIUM.NORMAL);
                 if (!string.IsNullOrEmpty(fallbackKey) && !keys.Contains(fallbackKey))
                     keys.Add(fallbackKey);
+            }
+
+            if (kind == SkinImageKind.Pet && !string.IsNullOrWhiteSpace(cardStringId))
+            {
+                string alternateKey = BuildSkinImageCacheKey(kind, string.Empty, cardStringId, premium);
+                if (!string.IsNullOrEmpty(alternateKey) && !keys.Contains(alternateKey))
+                    keys.Add(alternateKey);
+
+                if (premium != TAG_PREMIUM.NORMAL)
+                {
+                    string alternateFallbackKey = BuildSkinImageCacheKey(kind, string.Empty, cardStringId, TAG_PREMIUM.NORMAL);
+                    if (!string.IsNullOrEmpty(alternateFallbackKey) && !keys.Contains(alternateFallbackKey))
+                        keys.Add(alternateFallbackKey);
+                }
             }
 
             return keys;
