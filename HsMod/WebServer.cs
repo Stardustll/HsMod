@@ -1,13 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Net.Http;
+using System.Reflection;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
+using UnityEngine;
 using static HsMod.PluginConfig;
 
 namespace HsMod
@@ -23,25 +22,29 @@ namespace HsMod
         public static string shellCommand;
         public static bool shellCommandLock;
 
-        // 皮肤图片缓存: dbfid -> OSS image URL
-        private static ConcurrentDictionary<string, string> skinImageCache = new ConcurrentDictionary<string, string>();
-        private static volatile bool skinImageCacheLoaded = false;
-        private const string FBIGAME_OSS = "https://fbigame.oss-cn-beijing.aliyuncs.com/";
-        private const string FBIGAME_PAGE = "https://fbigame.com/card";
-        private const string FBIGAME_SEARCH = "https://fbigame.com/card/search";
-        private const string HEARTHSTONE_JSON_IMAGE = "https://art.hearthstonejson.com/v1/256x/";
-        private static string SkinImageCacheFile => Path.Combine(BepInEx.Paths.ConfigPath, "HsSkinImages.json");
+        // 皮肤图片缓存: 原画导出结果
         private static string SkinImageCacheDirectory => Path.Combine(BepInEx.Paths.ConfigPath, "HsSkinImages");
         private static readonly string[] SkinImageExtensions = { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp" };
-        private static readonly SemaphoreSlim skinImageCacheLoadSemaphore = new SemaphoreSlim(1, 1);
+        private static readonly string[] CardArtTextureMethodCandidates =
+        {
+            "GetStaticPortraitTexture",
+            "TryGetPortraitTexture",
+            "GetPreferredActorPortraitTexture",
+            "GetPortraitTextureHandle"
+        };
+        private static readonly string[] CardArtAssetReferenceMethodCandidates =
+        {
+            "GetSignaturePortraitRef",
+            "GetPremiumPortraitRef",
+            "GetPortraitRef"
+        };
         public static bool pluginConfigLock;
         public static bool updateLock;
 
-        private sealed class SkinImageDownloadResult
+        private sealed class CardArtExportResult
         {
-            public byte[] ImageBytes;
-            public string ContentType;
-            public string Extension;
+            public string FilePath;
+            public string ErrorMessage;
         }
 
         public static void Restart()
@@ -255,54 +258,13 @@ namespace HsMod
                     }
                 }
             }
-            else if (rawUrLower == "/skinimages")
-            {
-                context.Response.ContentType = "application/json; charset=UTF-8";
-                try
-                {
-                    string json = await GetSkinImagesJson();
-                    using (var writer = new StreamWriter(context.Response.OutputStream))
-                    {
-                        await writer.WriteLineAsync(json);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    context.Response.StatusCode = 500;
-                    using (var writer = new StreamWriter(context.Response.OutputStream))
-                    {
-                        await writer.WriteLineAsync($"{{\"error\":\"{ex.Message}\"}}");
-                    }
-                }
-            }
-            else if (rawUrLower == "/skinimages/refresh")
-            {
-                context.Response.ContentType = "application/json; charset=UTF-8";
-                try
-                {
-                    skinImageCache.Clear();
-                    skinImageCacheLoaded = false;
-                    await FetchSkinImagesFromFbigame();
-                    skinImageCacheLoaded = true;
-                    SaveSkinImageCacheToFile();
-                    string json = Newtonsoft.Json.JsonConvert.SerializeObject(skinImageCache);
-                    using (var writer = new StreamWriter(context.Response.OutputStream))
-                    {
-                        await writer.WriteLineAsync(json);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    context.Response.StatusCode = 500;
-                    using (var writer = new StreamWriter(context.Response.OutputStream))
-                    {
-                        await writer.WriteLineAsync($"{{\"error\":\"{ex.Message}\"}}");
-                    }
-                }
-            }
             else if (rawUrLower == "/skinimage")
             {
                 await HandleSkinImageRequestAsync(context);
+            }
+            else if (rawUrLower == "/cardart")
+            {
+                await HandleCardArtRequestAsync(context);
             }
             else
             {
@@ -378,6 +340,7 @@ namespace HsMod
             var request = context.Request;
             string dbfId = (request.QueryString["id"] ?? request.QueryString["dbfid"] ?? string.Empty).Trim();
             string cardStringId = (request.QueryString["cardStringId"] ?? request.QueryString["cardid"] ?? request.QueryString["card_id"] ?? string.Empty).Trim();
+            TAG_PREMIUM premium = ParsePremium(request.QueryString["premium"] ?? request.QueryString["quality"]);
 
             if (string.IsNullOrEmpty(dbfId) && string.IsNullOrEmpty(cardStringId))
             {
@@ -390,31 +353,17 @@ namespace HsMod
                 return;
             }
 
-            string localPath = FindLocalSkinImagePath(dbfId, cardStringId);
+            string localPath = FindLocalSkinImagePath(dbfId, cardStringId, premium);
             if (!string.IsNullOrEmpty(localPath))
             {
                 await WriteSkinImageFileAsync(context, localPath);
                 return;
             }
 
-            string remoteUrl = await ResolveSkinImageRemoteUrlAsync(dbfId, cardStringId);
-            SkinImageDownloadResult downloadResult = await TryDownloadSkinImageAsync(remoteUrl);
-            if (downloadResult != null)
+            CardArtExportResult exportResult = await TryExportCardArtAsync(dbfId, cardStringId, premium);
+            if (exportResult != null && !string.IsNullOrEmpty(exportResult.FilePath) && File.Exists(exportResult.FilePath))
             {
-                TrySaveSkinImageToFile(dbfId, cardStringId, downloadResult.Extension, downloadResult.ImageBytes);
-                context.Response.ContentType = !string.IsNullOrEmpty(downloadResult.ContentType) ? downloadResult.ContentType : GetMimeType(downloadResult.Extension);
-                await context.Response.OutputStream.WriteAsync(downloadResult.ImageBytes, 0, downloadResult.ImageBytes.Length);
-                return;
-            }
-
-            string fallbackUrl = GetHearthstoneJsonImageUrl(cardStringId);
-            if (!string.IsNullOrEmpty(fallbackUrl)
-                && !string.Equals(remoteUrl, fallbackUrl, StringComparison.OrdinalIgnoreCase)
-                && (downloadResult = await TryDownloadSkinImageAsync(fallbackUrl)) != null)
-            {
-                TrySaveSkinImageToFile(dbfId, cardStringId, downloadResult.Extension, downloadResult.ImageBytes);
-                context.Response.ContentType = !string.IsNullOrEmpty(downloadResult.ContentType) ? downloadResult.ContentType : GetMimeType(downloadResult.Extension);
-                await context.Response.OutputStream.WriteAsync(downloadResult.ImageBytes, 0, downloadResult.ImageBytes.Length);
+                await WriteSkinImageFileAsync(context, exportResult.FilePath);
                 return;
             }
 
@@ -422,8 +371,554 @@ namespace HsMod
             context.Response.ContentType = "text/plain; charset=UTF-8";
             using (var writer = new StreamWriter(context.Response.OutputStream))
             {
-                await writer.WriteAsync("Skin image not found.");
+                await writer.WriteAsync(string.IsNullOrEmpty(exportResult?.ErrorMessage) ? "Skin image not found." : exportResult.ErrorMessage);
             }
+        }
+
+        private static async Task HandleCardArtRequestAsync(HttpListenerContext context)
+        {
+            var request = context.Request;
+            string dbfId = (request.QueryString["id"] ?? request.QueryString["dbfid"] ?? string.Empty).Trim();
+            string cardStringId = (request.QueryString["cardStringId"] ?? request.QueryString["cardid"] ?? request.QueryString["card_id"] ?? string.Empty).Trim();
+            TAG_PREMIUM premium = ParsePremium(request.QueryString["premium"] ?? request.QueryString["quality"]);
+
+            if (string.IsNullOrEmpty(dbfId) && string.IsNullOrEmpty(cardStringId))
+            {
+                context.Response.StatusCode = 400;
+                context.Response.ContentType = "text/plain; charset=UTF-8";
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteAsync("Missing card id.");
+                }
+                return;
+            }
+
+            string localPath = FindLocalCardArtPath(dbfId, cardStringId, premium);
+            if (!string.IsNullOrEmpty(localPath))
+            {
+                await WriteSkinImageFileAsync(context, localPath);
+                return;
+            }
+
+            CardArtExportResult exportResult = await TryExportCardArtAsync(dbfId, cardStringId, premium);
+            if (exportResult != null && !string.IsNullOrEmpty(exportResult.FilePath) && File.Exists(exportResult.FilePath))
+            {
+                await WriteSkinImageFileAsync(context, exportResult.FilePath);
+                return;
+            }
+
+            context.Response.StatusCode = 404;
+            context.Response.ContentType = "text/plain; charset=UTF-8";
+            using (var writer = new StreamWriter(context.Response.OutputStream))
+            {
+                await writer.WriteAsync(string.IsNullOrEmpty(exportResult?.ErrorMessage) ? "Card art not found." : exportResult.ErrorMessage);
+            }
+        }
+
+        private static async Task<CardArtExportResult> TryExportCardArtAsync(string dbfId, string cardStringId, TAG_PREMIUM premium)
+        {
+            try
+            {
+                return await MainThreadDispatcher.EnqueueAsync(() => TryExportCardArtOnMainThread(dbfId, cardStringId, premium));
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ExportCardArtAsync error: {ex.Message}");
+                return new CardArtExportResult
+                {
+                    ErrorMessage = ex.Message
+                };
+            }
+        }
+
+        private static CardArtExportResult TryExportCardArtOnMainThread(string dbfId, string cardStringId, TAG_PREMIUM premium)
+        {
+            var result = new CardArtExportResult();
+            try
+            {
+                string resolvedCardId = ResolveCardStringId(dbfId, cardStringId);
+                if (string.IsNullOrEmpty(resolvedCardId))
+                {
+                    result.ErrorMessage = "Unable to resolve card id.";
+                    return result;
+                }
+
+                string existingPath = FindLocalCardArtPath(dbfId, resolvedCardId, premium);
+                if (!string.IsNullOrEmpty(existingPath))
+                {
+                    result.FilePath = existingPath;
+                    return result;
+                }
+
+                string cachePath = Path.Combine(SkinImageCacheDirectory, BuildCardArtCacheKey(dbfId, resolvedCardId, premium) + ".png");
+                Texture texture = TryResolveCardArtTexture(resolvedCardId, premium, out string textureError);
+                if (texture == null)
+                {
+                    result.ErrorMessage = textureError;
+                    return result;
+                }
+
+                if (!Utils.TryWriteTextureToPng(texture, cachePath))
+                {
+                    result.ErrorMessage = "Failed to encode portrait texture.";
+                    return result;
+                }
+
+                result.FilePath = cachePath;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ExportCardArt error: {ex.Message}");
+                result.ErrorMessage = ex.Message;
+                return result;
+            }
+        }
+
+        private static TAG_PREMIUM ParsePremium(string rawPremium)
+        {
+            if (string.IsNullOrWhiteSpace(rawPremium))
+                return TAG_PREMIUM.NORMAL;
+
+            string normalized = rawPremium.Trim().ToLowerInvariant();
+            switch (normalized)
+            {
+                case "golden":
+                case "gold":
+                case "1":
+                    return TAG_PREMIUM.GOLDEN;
+                case "diamond":
+                case "2":
+                    return TAG_PREMIUM.DIAMOND;
+                case "signature":
+                case "3":
+                    return TAG_PREMIUM.SIGNATURE;
+                default:
+                    return TAG_PREMIUM.NORMAL;
+            }
+        }
+
+        private static string ResolveCardStringId(string dbfId, string cardStringId)
+        {
+            if (!string.IsNullOrWhiteSpace(cardStringId))
+                return cardStringId.Trim();
+
+            if (int.TryParse(dbfId, out int dbId))
+            {
+                try
+                {
+                    return GameUtils.TranslateDbIdToCardId(dbId);
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ResolveCardStringId error: {ex.Message}");
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static string FindLocalCardArtPath(string dbfId, string cardStringId, TAG_PREMIUM premium)
+        {
+            return FindLocalSkinImagePath(dbfId, cardStringId, premium);
+        }
+
+        private static string BuildCardArtCacheKey(string dbfId, string cardStringId, TAG_PREMIUM premium)
+        {
+            string baseKey = !string.IsNullOrWhiteSpace(cardStringId) ? cardStringId.Trim() : dbfId.Trim();
+            if (string.IsNullOrEmpty(baseKey))
+                baseKey = "unknown";
+
+            foreach (char invalidChar in Path.GetInvalidFileNameChars())
+                baseKey = baseKey.Replace(invalidChar, '_');
+
+            if (premium != TAG_PREMIUM.NORMAL)
+                baseKey = baseKey + "-" + premium.ToString().ToUpperInvariant();
+
+            return baseKey;
+        }
+
+        private static string FindExportedCardTextureDownloadPath(string cardStringId, TAG_PREMIUM premium)
+        {
+            if (string.IsNullOrWhiteSpace(cardStringId))
+                return string.Empty;
+
+            string directory = Utils.GetCardTexturesDownloadDirectory();
+            if (!Directory.Exists(directory))
+                return string.Empty;
+
+            string[] files = Directory.GetFiles(directory, "*-" + cardStringId.Trim() + ".png");
+            if (files == null || files.Length == 0)
+                return string.Empty;
+
+            if (premium == TAG_PREMIUM.SIGNATURE)
+            {
+                string signatureFile = files.FirstOrDefault(file =>
+                    Path.GetFileNameWithoutExtension(file).IndexOf("-SIGNATURE-", StringComparison.OrdinalIgnoreCase) >= 0);
+                if (!string.IsNullOrEmpty(signatureFile))
+                    return signatureFile;
+            }
+
+            string normalFile = files.FirstOrDefault(file =>
+                Path.GetFileNameWithoutExtension(file).IndexOf("-SIGNATURE-", StringComparison.OrdinalIgnoreCase) < 0);
+            return !string.IsNullOrEmpty(normalFile) ? normalFile : files[0];
+        }
+
+        private static Texture TryResolveCardArtTexture(string cardStringId, TAG_PREMIUM premium, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            var defLoader = DefLoader.Get();
+            if (defLoader == null)
+            {
+                errorMessage = "DefLoader not ready.";
+                return null;
+            }
+
+            object disposableCardDef = null;
+            try
+            {
+                disposableCardDef = defLoader.GetCardDef(cardStringId, premium);
+                object cardDef = ExtractCardDefInstance(disposableCardDef);
+                Texture texture = TryResolveTextureFromObject(cardDef, premium);
+                if (texture != null)
+                    return texture;
+
+                EntityDef entityDef = null;
+                try
+                {
+                    entityDef = defLoader.GetEntityDef(cardStringId);
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"GetEntityDef error: {ex.Message}");
+                }
+
+                texture = TryResolveTextureFromPortraitAssetReference(entityDef, premium);
+                if (texture != null)
+                    return texture;
+
+                errorMessage = "Portrait methods returned no texture.";
+                return null;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryResolveCardArtTexture error: {ex.Message}");
+                return null;
+            }
+            finally
+            {
+                DisposeIfNeeded(disposableCardDef);
+            }
+        }
+
+        private static object ExtractCardDefInstance(object disposableCardDef)
+        {
+            if (disposableCardDef == null)
+                return null;
+
+            PropertyInfo cardDefProperty = disposableCardDef.GetType().GetProperty("CardDef", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (cardDefProperty != null)
+                return cardDefProperty.GetValue(disposableCardDef, null);
+
+            return disposableCardDef;
+        }
+
+        private static Texture TryResolveTextureFromObject(object target, TAG_PREMIUM premium)
+        {
+            if (target == null)
+                return null;
+
+            Type targetType = target.GetType();
+            foreach (string methodName in CardArtTextureMethodCandidates)
+            {
+                foreach (MethodInfo method in targetType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                {
+                    if (!string.Equals(method.Name, methodName, StringComparison.Ordinal))
+                        continue;
+
+                    if (TryInvokeTextureMethod(target, method, premium, out Texture texture) && texture != null)
+                        return texture;
+                }
+            }
+
+            foreach (PropertyInfo property in targetType.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!property.CanRead)
+                    continue;
+                if (property.GetIndexParameters().Length > 0)
+                    continue;
+                if (!property.Name.Contains("Portrait") && !string.Equals(property.Name, "Texture2D", StringComparison.Ordinal))
+                    continue;
+
+                Texture texture = TryExtractTexture(property.GetValue(target, null));
+                if (texture != null)
+                    return texture;
+            }
+
+            foreach (FieldInfo field in targetType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!field.Name.Contains("Portrait") && !string.Equals(field.Name, "Texture2D", StringComparison.Ordinal))
+                    continue;
+
+                Texture texture = TryExtractTexture(field.GetValue(target));
+                if (texture != null)
+                    return texture;
+            }
+
+            return null;
+        }
+
+        private static bool TryInvokeTextureMethod(object target, MethodInfo method, TAG_PREMIUM premium, out Texture texture)
+        {
+            texture = null;
+            object[] arguments = BuildInvocationArguments(method, premium);
+            if (arguments == null)
+                return false;
+
+            object returnValue = method.Invoke(target, arguments);
+            texture = TryExtractTexture(returnValue);
+            if (texture != null)
+                return true;
+
+            ParameterInfo[] parameters = method.GetParameters();
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                if (!parameters[i].ParameterType.IsByRef && !parameters[i].IsOut)
+                    continue;
+
+                texture = TryExtractTexture(arguments[i]);
+                if (texture != null)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static Texture TryResolveTextureFromPortraitAssetReference(object entityDef, TAG_PREMIUM premium)
+        {
+            if (entityDef == null)
+                return null;
+
+            foreach (string methodName in ResolveCardArtAssetReferenceMethodOrder(premium))
+            {
+                foreach (MethodInfo method in entityDef.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                {
+                    if (!string.Equals(method.Name, methodName, StringComparison.Ordinal))
+                        continue;
+
+                    object[] arguments = BuildInvocationArguments(method, premium);
+                    if (arguments == null)
+                        continue;
+
+                    object assetReference = method.Invoke(entityDef, arguments);
+                    Texture texture = TryLoadTextureFromAssetReference(assetReference);
+                    if (texture != null)
+                        return texture;
+                }
+            }
+
+            return null;
+        }
+
+        private static IEnumerable<string> ResolveCardArtAssetReferenceMethodOrder(TAG_PREMIUM premium)
+        {
+            if (premium == TAG_PREMIUM.SIGNATURE)
+            {
+                return new[]
+                {
+                    CardArtAssetReferenceMethodCandidates[0],
+                    CardArtAssetReferenceMethodCandidates[1],
+                    CardArtAssetReferenceMethodCandidates[2]
+                };
+            }
+
+            if (premium == TAG_PREMIUM.GOLDEN || premium == TAG_PREMIUM.DIAMOND)
+            {
+                return new[]
+                {
+                    CardArtAssetReferenceMethodCandidates[1],
+                    CardArtAssetReferenceMethodCandidates[2],
+                    CardArtAssetReferenceMethodCandidates[0]
+                };
+            }
+
+            return new[]
+            {
+                CardArtAssetReferenceMethodCandidates[2],
+                CardArtAssetReferenceMethodCandidates[1],
+                CardArtAssetReferenceMethodCandidates[0]
+            };
+        }
+
+        private static object[] BuildInvocationArguments(MethodInfo method, TAG_PREMIUM premium)
+        {
+            ParameterInfo[] parameters = method.GetParameters();
+            if (parameters.Length == 0)
+                return Array.Empty<object>();
+
+            var args = new object[parameters.Length];
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                if (!TryBuildInvocationArgument(parameters[i], premium, out object argument))
+                    return null;
+                args[i] = argument;
+            }
+            return args;
+        }
+
+        private static bool TryBuildInvocationArgument(ParameterInfo parameter, TAG_PREMIUM premium, out object argument)
+        {
+            Type parameterType = parameter.ParameterType;
+            Type actualType = parameterType.IsByRef ? parameterType.GetElementType() : parameterType;
+            argument = null;
+
+            if (actualType == null)
+                return false;
+
+            if (actualType == typeof(TAG_PREMIUM))
+            {
+                argument = premium;
+                return true;
+            }
+
+            if (actualType == typeof(string))
+            {
+                argument = string.Empty;
+                return true;
+            }
+
+            if (actualType == typeof(bool))
+            {
+                argument = false;
+                return true;
+            }
+
+            if (actualType.IsEnum)
+            {
+                argument = GetDefaultEnumValue(actualType);
+                return true;
+            }
+
+            if (!actualType.IsValueType)
+            {
+                argument = null;
+                return true;
+            }
+
+            try
+            {
+                argument = Activator.CreateInstance(actualType);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static object GetDefaultEnumValue(Type enumType)
+        {
+            Array values = Enum.GetValues(enumType);
+            if (values.Length <= 0)
+                return Activator.CreateInstance(enumType);
+
+            foreach (var value in values)
+            {
+                string name = value.ToString();
+                if (string.Equals(name, "None", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(name, "Default", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(name, "Normal", StringComparison.OrdinalIgnoreCase))
+                {
+                    return value;
+                }
+            }
+
+            return values.GetValue(0);
+        }
+
+        private static Texture TryExtractTexture(object value)
+        {
+            if (value == null)
+                return null;
+
+            if (value is Texture texture)
+                return texture;
+
+            Type valueType = value.GetType();
+            PropertyInfo assetProperty = valueType.GetProperty("Asset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (assetProperty != null)
+            {
+                Texture assetTexture = TryExtractTexture(assetProperty.GetValue(value, null));
+                if (assetTexture != null)
+                    return assetTexture;
+            }
+
+            foreach (PropertyInfo property in valueType.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!property.CanRead)
+                    continue;
+                if (property.GetIndexParameters().Length > 0)
+                    continue;
+                if (!typeof(Texture).IsAssignableFrom(property.PropertyType))
+                    continue;
+
+                Texture propertyTexture = property.GetValue(value, null) as Texture;
+                if (propertyTexture != null)
+                    return propertyTexture;
+            }
+
+            foreach (FieldInfo field in valueType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (!typeof(Texture).IsAssignableFrom(field.FieldType))
+                    continue;
+
+                Texture fieldTexture = field.GetValue(value) as Texture;
+                if (fieldTexture != null)
+                    return fieldTexture;
+            }
+
+            return null;
+        }
+
+        private static Texture TryLoadTextureFromAssetReference(object assetReference)
+        {
+            if (assetReference == null)
+                return null;
+
+            try
+            {
+                object assetLoader = AssetLoader.Get();
+                if (assetLoader == null)
+                    return null;
+
+                MethodInfo loadAssetMethod = assetLoader.GetType()
+                    .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .FirstOrDefault(method => method.Name == "LoadAsset" && method.IsGenericMethodDefinition && method.GetParameters().Length == 2);
+
+                if (loadAssetMethod == null)
+                    return null;
+
+                ParameterInfo[] parameters = loadAssetMethod.GetParameters();
+                object loadingOptions = parameters[1].ParameterType.IsEnum
+                    ? Activator.CreateInstance(parameters[1].ParameterType)
+                    : null;
+                object assetHandle = loadAssetMethod.MakeGenericMethod(typeof(Texture2D))
+                    .Invoke(assetLoader, new[] { assetReference, loadingOptions });
+
+                return TryExtractTexture(assetHandle);
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryLoadTextureFromAssetReference error: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static void DisposeIfNeeded(object value)
+        {
+            if (value is IDisposable disposable)
+                disposable.Dispose();
         }
 
         private static async Task WriteSkinImageFileAsync(HttpListenerContext context, string filePath)
@@ -433,9 +928,10 @@ namespace HsMod
             await context.Response.OutputStream.WriteAsync(file, 0, file.Length);
         }
 
-        private static string FindLocalSkinImagePath(string dbfId, string cardStringId)
+        private static string FindLocalSkinImagePath(string dbfId, string cardStringId, TAG_PREMIUM premium)
         {
-            foreach (string cacheKey in GetSkinImageCacheKeys(dbfId, cardStringId))
+            string resolvedCardId = ResolveCardStringId(dbfId, cardStringId);
+            foreach (string cacheKey in GetSkinImageCacheKeys(dbfId, resolvedCardId, premium))
             {
                 foreach (string extension in SkinImageExtensions)
                 {
@@ -444,325 +940,32 @@ namespace HsMod
                         return filePath;
                 }
             }
+
+            if (!string.IsNullOrEmpty(resolvedCardId))
+            {
+                string exportedPath = FindExportedCardTextureDownloadPath(resolvedCardId, premium);
+                if (!string.IsNullOrEmpty(exportedPath))
+                    return exportedPath;
+            }
+
             return string.Empty;
         }
 
-        private static IEnumerable<string> GetSkinImageCacheKeys(string dbfId, string cardStringId)
+        private static IEnumerable<string> GetSkinImageCacheKeys(string dbfId, string cardStringId, TAG_PREMIUM premium)
         {
             var keys = new List<string>();
-            string normalizedDbfId = NormalizeSkinImageCacheKey(dbfId);
-            string normalizedCardStringId = NormalizeSkinImageCacheKey(cardStringId);
+            string primaryKey = BuildCardArtCacheKey(dbfId, cardStringId, premium);
+            if (!string.IsNullOrEmpty(primaryKey))
+                keys.Add(primaryKey);
 
-            if (!string.IsNullOrEmpty(normalizedDbfId))
-                keys.Add(normalizedDbfId);
-            if (!string.IsNullOrEmpty(normalizedCardStringId) && !keys.Contains(normalizedCardStringId))
-                keys.Add(normalizedCardStringId);
+            if (premium != TAG_PREMIUM.NORMAL)
+            {
+                string fallbackKey = BuildCardArtCacheKey(dbfId, cardStringId, TAG_PREMIUM.NORMAL);
+                if (!string.IsNullOrEmpty(fallbackKey) && !keys.Contains(fallbackKey))
+                    keys.Add(fallbackKey);
+            }
 
             return keys;
-        }
-
-        private static string NormalizeSkinImageCacheKey(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                return string.Empty;
-
-            string normalized = value.Trim();
-            foreach (char invalidChar in Path.GetInvalidFileNameChars())
-                normalized = normalized.Replace(invalidChar, '_');
-            return normalized;
-        }
-
-        private static string GetPrimarySkinImageCacheKey(string dbfId, string cardStringId)
-        {
-            foreach (string cacheKey in GetSkinImageCacheKeys(dbfId, cardStringId))
-                return cacheKey;
-            return string.Empty;
-        }
-
-        private static async Task<string> ResolveSkinImageRemoteUrlAsync(string dbfId, string cardStringId)
-        {
-            if (!string.IsNullOrEmpty(dbfId))
-            {
-                await EnsureSkinImageCacheLoadedAsync();
-                if (skinImageCache.TryGetValue(dbfId, out string remoteUrl) && !string.IsNullOrEmpty(remoteUrl))
-                    return remoteUrl;
-            }
-
-            return GetHearthstoneJsonImageUrl(cardStringId);
-        }
-
-        private static string GetHearthstoneJsonImageUrl(string cardStringId)
-        {
-            return string.IsNullOrEmpty(cardStringId) ? string.Empty : HEARTHSTONE_JSON_IMAGE + cardStringId + ".jpg";
-        }
-
-        private static async Task<SkinImageDownloadResult> TryDownloadSkinImageAsync(string imageUrl)
-        {
-            if (string.IsNullOrEmpty(imageUrl))
-                return null;
-
-            try
-            {
-                using (var client = new HttpClient())
-                {
-                    client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-                    using (var response = await client.GetAsync(imageUrl))
-                    {
-                        if (!response.IsSuccessStatusCode)
-                            return null;
-
-                        byte[] imageBytes = await response.Content.ReadAsByteArrayAsync();
-                        if (imageBytes == null || imageBytes.Length == 0)
-                            return null;
-
-                        string contentType = response.Content.Headers.ContentType != null
-                            ? response.Content.Headers.ContentType.MediaType
-                            : string.Empty;
-                        return new SkinImageDownloadResult
-                        {
-                            ImageBytes = imageBytes,
-                            ContentType = contentType,
-                            Extension = GetSkinImageExtension(imageUrl, contentType)
-                        };
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"DownloadSkinImage error: {ex.Message}");
-                return null;
-            }
-        }
-
-        private static string GetSkinImageExtension(string imageUrl, string contentType)
-        {
-            if (!string.IsNullOrEmpty(contentType))
-            {
-                switch (contentType.ToLowerInvariant())
-                {
-                    case "image/png":
-                        return ".png";
-                    case "image/gif":
-                        return ".gif";
-                    case "image/bmp":
-                        return ".bmp";
-                    case "image/webp":
-                        return ".webp";
-                    case "image/jpeg":
-                    case "image/jpg":
-                        return ".jpg";
-                }
-            }
-
-            try
-            {
-                string imagePath = new Uri(imageUrl).AbsolutePath;
-                string extension = Path.GetExtension(imagePath);
-                if (!string.IsNullOrEmpty(extension) && SkinImageExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
-                    return extension.ToLowerInvariant();
-            }
-            catch
-            {
-            }
-
-            return ".jpg";
-        }
-
-        private static void TrySaveSkinImageToFile(string dbfId, string cardStringId, string extension, byte[] imageBytes)
-        {
-            try
-            {
-                string cacheKey = GetPrimarySkinImageCacheKey(dbfId, cardStringId);
-                if (string.IsNullOrEmpty(cacheKey) || imageBytes == null || imageBytes.Length == 0)
-                    return;
-
-                Directory.CreateDirectory(SkinImageCacheDirectory);
-                string finalExtension = string.IsNullOrEmpty(extension) ? ".jpg" : extension.ToLowerInvariant();
-                string targetPath = Path.Combine(SkinImageCacheDirectory, cacheKey + finalExtension);
-
-                if (!File.Exists(targetPath))
-                    File.WriteAllBytes(targetPath, imageBytes);
-            }
-            catch (Exception ex)
-            {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"SaveSkinImageFile error: {ex.Message}");
-            }
-        }
-
-        private static async Task EnsureSkinImageCacheLoadedAsync()
-        {
-            if (skinImageCacheLoaded)
-                return;
-
-            await skinImageCacheLoadSemaphore.WaitAsync();
-            try
-            {
-                if (skinImageCacheLoaded)
-                    return;
-
-                if (LoadSkinImageCacheFromFile())
-                {
-                    Utils.MyLogger(BepInEx.Logging.LogLevel.Info, $"SkinImageCache loaded from file: {skinImageCache.Count} entries");
-                }
-                else
-                {
-                    await FetchSkinImagesFromFbigame();
-                    SaveSkinImageCacheToFile();
-                }
-
-                skinImageCacheLoaded = true;
-            }
-            finally
-            {
-                skinImageCacheLoadSemaphore.Release();
-            }
-        }
-
-        /// <summary>
-        /// 从 fbigame.com 按职业前缀搜索英雄皮肤图片映射 (dbfid -> OSS image URL)
-        /// </summary>
-        private static async Task FetchSkinImagesFromFbigame()
-        {
-            try
-            {
-                var handler = new HttpClientHandler { CookieContainer = new System.Net.CookieContainer(), UseCookies = true };
-                using (var client = new HttpClient(handler))
-                {
-                    client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-
-                    // 1. GET page to obtain CSRF token
-                    var pageResp = await client.GetAsync(FBIGAME_PAGE);
-                    string pageHtml = await pageResp.Content.ReadAsStringAsync();
-
-                    string csrf = "";
-                    var csrfMatch = System.Text.RegularExpressions.Regex.Match(pageHtml, @"csrf-token""\s*content=""([^""]+)""");
-                    if (csrfMatch.Success) csrf = csrfMatch.Groups[1].Value;
-
-                    string xsrf = "";
-                    var allCookies = handler.CookieContainer.GetCookies(new Uri(FBIGAME_PAGE));
-                    foreach (System.Net.Cookie ck in allCookies)
-                    {
-                        if (ck.Name == "XSRF-TOKEN") { xsrf = ck.Value; break; }
-                    }
-
-                    if (string.IsNullOrEmpty(csrf)) return;
-
-                    // 2. 按职业前缀搜索: HERO_01 ~ HERO_12
-                    string[] prefixes = { "HERO_01", "HERO_02", "HERO_03", "HERO_04", "HERO_05",
-                        "HERO_06", "HERO_07", "HERO_08", "HERO_09", "HERO_10", "HERO_11", "HERO_12" };
-
-                    foreach (string prefix in prefixes)
-                    {
-                        try { await SearchFbigameHeroes(client, csrf, xsrf, prefix, 1); }
-                        catch { }
-                    }
-                }
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Info, $"SkinImageCache loaded: {skinImageCache.Count} entries");
-            }
-            catch (Exception ex)
-            {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"FetchSkinImages error: {ex.Message}");
-            }
-        }
-
-        private static async Task SearchFbigameHeroes(HttpClient client, string csrf, string xsrf, string query, int page)
-        {
-            var payload = Newtonsoft.Json.JsonConvert.SerializeObject(new
-            {
-                searchQuery = query, page = page, mode = "list",
-                zilliaxSearch = 0, sideboardType = 0, touristClassId = 0
-            });
-            var req = new HttpRequestMessage(HttpMethod.Post, FBIGAME_SEARCH);
-            req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
-            req.Headers.Add("X-Requested-With", "XMLHttpRequest");
-            req.Headers.Add("X-CSRF-TOKEN", csrf);
-            if (!string.IsNullOrEmpty(xsrf)) req.Headers.Add("X-XSRF-TOKEN", xsrf);
-            req.Headers.Add("Referer", FBIGAME_PAGE);
-            req.Headers.Add("Accept", "application/json");
-
-            var resp = await client.SendAsync(req);
-            if (!resp.IsSuccessStatusCode) return;
-
-            string json = await resp.Content.ReadAsStringAsync();
-            var root = Newtonsoft.Json.Linq.JObject.Parse(json);
-            var dataArr = root["data"] as Newtonsoft.Json.Linq.JArray;
-            if (dataArr == null) return;
-
-            foreach (Newtonsoft.Json.Linq.JObject card in dataArr)
-            {
-                int cardType = card.ContainsKey("card_type") ? (int)card["card_type"] : 0;
-                if (cardType != 3) continue;
-
-                string dbfid = card.ContainsKey("dbfid") ? card["dbfid"].ToString() : "";
-                if (string.IsNullOrEmpty(dbfid)) continue;
-
-                string imgNormal = "";
-                string tile = "";
-                var imgObj = card["image"] as Newtonsoft.Json.Linq.JObject;
-                if (imgObj != null && imgObj.ContainsKey("image_normal"))
-                    imgNormal = imgObj["image_normal"].ToString();
-                var tileObj = card["tile"] as Newtonsoft.Json.Linq.JObject;
-                if (tileObj != null && tileObj.ContainsKey("image"))
-                    tile = tileObj["image"].ToString();
-
-                string imgPath = !string.IsNullOrEmpty(imgNormal) ? imgNormal : tile;
-                if (!string.IsNullOrEmpty(imgPath))
-                    skinImageCache[dbfid] = FBIGAME_OSS + imgPath + "?x-oss-process=style/hearthstone-image";
-            }
-
-            int lastPage = root.ContainsKey("last_page") ? (int)root["last_page"] : 1;
-            if (page < lastPage)
-                await SearchFbigameHeroes(client, csrf, xsrf, query, page + 1);
-        }
-
-        /// <summary>
-        /// 获取皮肤图片JSON映射 (dbfid -> imageUrl)
-        /// 优先从本地缓存文件加载，无缓存时从 fbigame 获取并保存
-        /// </summary>
-        private static async Task<string> GetSkinImagesJson()
-        {
-            await EnsureSkinImageCacheLoadedAsync();
-            return Newtonsoft.Json.JsonConvert.SerializeObject(skinImageCache);
-        }
-
-        /// <summary>
-        /// 从本地文件加载皮肤图片缓存
-        /// </summary>
-        private static bool LoadSkinImageCacheFromFile()
-        {
-            try
-            {
-                if (!File.Exists(SkinImageCacheFile)) return false;
-                string json = File.ReadAllText(SkinImageCacheFile);
-                var dict = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, string>>(json);
-                if (dict == null || dict.Count == 0) return false;
-                foreach (var kv in dict)
-                    skinImageCache[kv.Key] = kv.Value;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"LoadSkinImageCache error: {ex.Message}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// 将皮肤图片缓存保存到本地文件
-        /// </summary>
-        private static void SaveSkinImageCacheToFile()
-        {
-            try
-            {
-                if (skinImageCache.Count == 0) return;
-                string json = Newtonsoft.Json.JsonConvert.SerializeObject(skinImageCache);
-                File.WriteAllText(SkinImageCacheFile, json);
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Info, $"SkinImageCache saved to file: {skinImageCache.Count} entries");
-            }
-            catch (Exception ex)
-            {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"SaveSkinImageCache error: {ex.Message}");
-            }
         }
 
         public static StringBuilder Route(string url = "")

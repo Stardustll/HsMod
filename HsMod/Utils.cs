@@ -1977,56 +1977,24 @@ namespace HsMod
                             type = "-SIGNATURE";
                         }
 
-                        string filePath = Path.Combine(
-                            Application.dataPath.Substring(0, Application.dataPath.LastIndexOf("/")),
-                            "CardTexturesDownload", cardName + type + "-" + cardId + ".png");
+                        string filePath = Path.Combine(GetCardTexturesDownloadDirectory(), cardName + type + "-" + cardId + ".png");
 
                         if (File.Exists(filePath))
                         {
                             yield break;
                         }
 
-                        RenderTexture rt = RenderTexture.GetTemporary(
-                            texture.width,
-                            texture.height,
-                            0,
-                            RenderTextureFormat.ARGBFloat,
-                            RenderTextureReadWrite.Linear,
-                            8,
-                            RenderTextureMemoryless.None);
-
-                        Material copyMat = new Material(Shader.Find("Unlit/Texture"));
-                        Graphics.Blit(texture, rt, copyMat);
-                        UnityEngine.Object.Destroy(copyMat);
-
-                        RenderTexture previous = RenderTexture.active;
-                        RenderTexture.active = rt;
-
-                        Texture2D readableTexture = new Texture2D(
-                            texture.width,
-                            texture.height,
-                            TextureFormat.RGBAFloat,
-                            false,
-                            true);
-
-                        readableTexture.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
-                        readableTexture.Apply();
-
-                        RenderTexture.active = previous;
-                        RenderTexture.ReleaseTemporary(rt);
-
-                        File.WriteAllBytes(filePath, readableTexture.EncodeToPNG());
-                        UnityEngine.Object.Destroy(readableTexture);
+                        TryWriteTextureToPng(texture, filePath);
                     }
                 }
             }
             catch (Exception e)
             {
-                if (!Directory.Exists(Path.Combine("CardTexturesDownload")))
+                if (!Directory.Exists(GetCardTexturesDownloadDirectory()))
                 {
                     try
                     {
-                        Directory.CreateDirectory(Path.Combine("CardTexturesDownload"));
+                        Directory.CreateDirectory(GetCardTexturesDownloadDirectory());
                     }
                     catch (Exception e2)
                     {
@@ -2038,6 +2006,72 @@ namespace HsMod
             }
 
             yield break;
+        }
+
+        public static string GetCardTexturesDownloadDirectory()
+        {
+            string applicationPath = Application.dataPath ?? string.Empty;
+            int lastSlashIndex = applicationPath.LastIndexOf("/");
+            if (lastSlashIndex > 0)
+                return Path.Combine(applicationPath.Substring(0, lastSlashIndex), "CardTexturesDownload");
+            return Path.Combine("CardTexturesDownload");
+        }
+
+        public static bool TryWriteTextureToPng(Texture texture, string filePath)
+        {
+            if (texture == null || string.IsNullOrEmpty(filePath))
+                return false;
+
+            RenderTexture rt = null;
+            Material copyMat = null;
+            Texture2D readableTexture = null;
+            RenderTexture previous = RenderTexture.active;
+            try
+            {
+                string directory = Path.GetDirectoryName(filePath);
+                if (!string.IsNullOrEmpty(directory))
+                    Directory.CreateDirectory(directory);
+
+                rt = RenderTexture.GetTemporary(
+                    texture.width,
+                    texture.height,
+                    0,
+                    RenderTextureFormat.ARGBFloat,
+                    RenderTextureReadWrite.Linear,
+                    8,
+                    RenderTextureMemoryless.None);
+
+                copyMat = new Material(Shader.Find("Unlit/Texture"));
+                Graphics.Blit(texture, rt, copyMat);
+
+                RenderTexture.active = rt;
+                readableTexture = new Texture2D(
+                    texture.width,
+                    texture.height,
+                    TextureFormat.RGBAFloat,
+                    false,
+                    true);
+                readableTexture.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+                readableTexture.Apply();
+
+                File.WriteAllBytes(filePath, readableTexture.EncodeToPNG());
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MyLogger(LogLevel.Error, ex);
+                return false;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                if (rt != null)
+                    RenderTexture.ReleaseTemporary(rt);
+                if (copyMat != null)
+                    UnityEngine.Object.Destroy(copyMat);
+                if (readableTexture != null)
+                    UnityEngine.Object.Destroy(readableTexture);
+            }
         }
     }
 }
