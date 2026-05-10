@@ -1205,9 +1205,73 @@ namespace HsMod
             return root;
         }
 
+        private static Hearthstone.DataModels.ShopDataModel TryGetShopDataModelFromObject(object target)
+        {
+            if (target == null)
+            {
+                return null;
+            }
+
+            Type targetType = target.GetType();
+
+            PropertyInfo property = targetType.GetProperty("ShopDataModel", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? targetType.GetProperty("ShopData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? targetType.GetProperty("m_shopData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (property != null)
+            {
+                return property.GetValue(target, null) as Hearthstone.DataModels.ShopDataModel;
+            }
+
+            FieldInfo field = targetType.GetField("m_shopData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? targetType.GetField("_shopData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (field != null)
+            {
+                return field.GetValue(target) as Hearthstone.DataModels.ShopDataModel;
+            }
+
+            return null;
+        }
+
+        private static Hearthstone.DataModels.ShopDataModel GetShopDataModelCompat()
+        {
+            try
+            {
+                StoreManager storeManager = StoreManager.Get();
+                if (storeManager != null)
+                {
+                    MethodInfo getShopDataModelMethod = typeof(StoreManager).GetMethod(
+                        "GetShopDataModel",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (getShopDataModelMethod != null)
+                    {
+                        Hearthstone.DataModels.ShopDataModel reflectedResult =
+                            getShopDataModelMethod.Invoke(storeManager, null) as Hearthstone.DataModels.ShopDataModel;
+                        if (reflectedResult != null)
+                        {
+                            return reflectedResult;
+                        }
+                    }
+
+                    Hearthstone.DataModels.ShopDataModel currentStoreDataModel =
+                        TryGetShopDataModelFromObject(storeManager.GetCurrentStore());
+                    if (currentStoreDataModel != null)
+                    {
+                        return currentStoreDataModel;
+                    }
+                }
+
+                return TryGetShopDataModelFromObject(Shop.Get());
+            }
+            catch (Exception ex)
+            {
+                MyLogger(LogLevel.Warning, $"GetShopDataModelCompat => {ex.Message}");
+                return null;
+            }
+        }
+
         private static Hearthstone.DataModels.ProductDataModel FindZeroDollarShoppingPanelTemplateProduct()
         {
-            var shopDataModel = StoreManager.Get()?.GetShopDataModel();
+            var shopDataModel = GetShopDataModelCompat();
             if (shopDataModel?.Pages == null)
             {
                 return null;

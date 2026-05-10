@@ -44,6 +44,27 @@ namespace HsMod
             UIStatus.Get()?.AddInfo($"当前倍速：x{currentScale:0.###}", 3f);
         }
 
+        public static void ShowStandardDeckMismatchPopupCompat(DeckPickerTrayDisplay instance)
+        {
+            try
+            {
+                MethodInfo popupMethod = typeof(DeckPickerTrayDisplay).GetMethod(
+                    "ShowClickedStandardDeckInTwistPopup",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (popupMethod != null)
+                {
+                    popupMethod.Invoke(instance, null);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"ShowStandardDeckMismatchPopupCompat => {ex.Message}");
+            }
+
+            UIStatus.Get()?.AddInfo("当前模式下，已阻止误触标准卡组。", 4f);
+        }
+
         public static void LoadPatch(Type loadType)
         {
             try
@@ -994,7 +1015,7 @@ namespace HsMod
                     if (collectionDeck.FormatType == PegasusShared.FormatType.FT_STANDARD &&
                         (int)Options.GetFormatType() == 1)
                     {
-                        __instance.ShowClickedStandardDeckInTwistPopup();
+                        PatchManager.ShowStandardDeckMismatchPopupCompat(__instance);
                         return false;
                     }
                 }
