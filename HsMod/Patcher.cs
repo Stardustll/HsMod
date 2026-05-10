@@ -2370,7 +2370,6 @@ namespace HsMod
                             cornerManager.GetCornerReplacementContext(Player.Side.OPPOSING));
                     }
 
-                    PetEntityInjector.RefreshConfiguredPetEntities();
                     RefreshConfiguredPetBodiesInScene();
                 }
                 catch (Exception ex)
@@ -2580,12 +2579,18 @@ namespace HsMod
                     }
                 }
 
+                if (targetVariantId == 0)
+                {
+                    petController.ClearPet("HsMod.HidePet");
+                    return;
+                }
+
                 UpdatePetRoot(petController);
+                petController.ClearPet("HsMod.ReloadPet");
                 petController.SetPetFromVariantId(targetVariantId, true);
 
                 Actor actor = petController.GetComponentInParent<Actor>();
                 actor?.UpdatePetComponents();
-                petController.CreatePetObject();
             }
 
             private static void RefreshConfiguredPetBodiesInScene(Player.Side? targetSide = null)
