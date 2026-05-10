@@ -2370,6 +2370,7 @@ namespace HsMod
                             cornerManager.GetCornerReplacementContext(Player.Side.OPPOSING));
                     }
 
+                    PetEntityInjector.RefreshConfiguredPetEntities();
                     RefreshConfiguredPetBodiesInScene();
                 }
                 catch (Exception ex)
