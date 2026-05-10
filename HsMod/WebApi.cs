@@ -142,6 +142,10 @@ namespace HsMod
                 if (converter != null)
                 {
                     configEntry.SetSerializedValue(value);
+                    if (key.Equals("skinPet") || key.Equals("skinOpposingPet"))
+                    {
+                        _ = MainThreadDispatcher.EnqueueAsync(() => Patcher.PatchFavorite.RefreshConfiguredPetSelection());
+                    }
                     res = configEntry.GetSerializedValue();
                     return 200;
                 }

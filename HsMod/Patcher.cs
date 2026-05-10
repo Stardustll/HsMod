@@ -2340,6 +2340,44 @@ namespace HsMod
                 }
             }
 
+            public static void RefreshConfiguredPetSelection()
+            {
+                try
+                {
+                    GameState gameState = GameState.Get();
+
+                    PetEntityInjector.FriendlyPetVariantId = skinPet.Value;
+                    PetEntityInjector.OpposingPetVariantId = skinOpposingPet.Value;
+
+                    if (gameState != null)
+                    {
+                        if (skinPet.Value != -1)
+                        {
+                            gameState.GetPlayerBySide(Player.Side.FRIENDLY)?.SetTag(GAME_TAG.PET_VARIANT_ID, skinPet.Value);
+                        }
+
+                        if (skinOpposingPet.Value != -1)
+                        {
+                            gameState.GetPlayerBySide(Player.Side.OPPOSING)?.SetTag(GAME_TAG.PET_VARIANT_ID, skinOpposingPet.Value);
+                        }
+                    }
+
+                    CornerSpellReplacementManager cornerManager = gameState?.GetCornerReplacementManager();
+                    if (cornerManager != null)
+                    {
+                        cornerManager.UpdateCornerReplacements(
+                            cornerManager.GetCornerReplacementContext(Player.Side.FRIENDLY),
+                            cornerManager.GetCornerReplacementContext(Player.Side.OPPOSING));
+                    }
+
+                    RefreshConfiguredPetBodiesInScene();
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex);
+                }
+            }
+
             [HarmonyPrefix]
             [HarmonyPatch(typeof(PetControllerGame), "SetPet")]
             private static void PatchPetControllerSetPet(PetControllerGame __instance, ref string petDataHandler, bool create)
@@ -2351,7 +2389,7 @@ namespace HsMod
                         return;
                     }
 
-                    int targetVariantId = __instance.IsFriendly(false) ? skinPet.Value : skinOpposingPet.Value;
+                    int targetVariantId = GetConfiguredPetVariantId(GetPetControllerSide(__instance));
                     if (targetVariantId < 0)
                     {
                         return;
@@ -2403,7 +2441,7 @@ namespace HsMod
                         return true;
                     }
 
-                    int targetVariantId = __instance.IsFriendly(false) ? skinPet.Value : skinOpposingPet.Value;
+                    int targetVariantId = GetConfiguredPetVariantId(GetPetControllerSide(__instance));
                     if (targetVariantId <= 0)
                     {
                         return true;
@@ -2437,6 +2475,21 @@ namespace HsMod
 
                         Player opposingPlayer = gameState.GetPlayerBySide(Player.Side.OPPOSING);
                         if (opposingPlayer != null && opposingPlayer.GetPlayerId() == controllerId)
+                        {
+                            return Player.Side.OPPOSING;
+                        }
+                    }
+
+                    if (gameState != null)
+                    {
+                        Player friendlyPlayer = gameState.GetPlayerBySide(Player.Side.FRIENDLY);
+                        if (ReferenceEquals(friendlyPlayer?.GetPetCard()?.GetActor()?.m_petController, petController))
+                        {
+                            return Player.Side.FRIENDLY;
+                        }
+
+                        Player opposingPlayer = gameState.GetPlayerBySide(Player.Side.OPPOSING);
+                        if (ReferenceEquals(opposingPlayer?.GetPetCard()?.GetActor()?.m_petController, petController))
                         {
                             return Player.Side.OPPOSING;
                         }
@@ -2496,18 +2549,30 @@ namespace HsMod
                 }
             }
 
-            private static void RefreshOpposingPetBody(PetControllerGame petController)
+            private static int GetConfiguredPetVariantId(Player.Side side)
             {
-                if (petController == null || GetPetControllerSide(petController) != Player.Side.OPPOSING || skinOpposingPet.Value < 0)
+                return side == Player.Side.FRIENDLY ? skinPet.Value : skinOpposingPet.Value;
+            }
+
+            private static void RefreshConfiguredPetBody(PetControllerGame petController)
+            {
+                if (petController == null)
+                {
+                    return;
+                }
+
+                Player.Side side = GetPetControllerSide(petController);
+                int targetVariantId = GetConfiguredPetVariantId(side);
+                if (targetVariantId < 0)
                 {
                     return;
                 }
 
                 Entity entity = petController.GetEntity();
-                PetVariantDbfRecord targetVariant = (skinOpposingPet.Value > 0) ? GameDbf.PetVariant.GetRecord(skinOpposingPet.Value) : null;
+                PetVariantDbfRecord targetVariant = (targetVariantId > 0) ? GameDbf.PetVariant.GetRecord(targetVariantId) : null;
                 if (entity != null)
                 {
-                    entity.SetTag(GAME_TAG.PET_VARIANT_ID, skinOpposingPet.Value);
+                    entity.SetTag(GAME_TAG.PET_VARIANT_ID, targetVariantId);
                     if (targetVariant != null)
                     {
                         entity.SetTag((GAME_TAG)4079, targetVariant.PetId);
@@ -2515,16 +2580,23 @@ namespace HsMod
                 }
 
                 UpdatePetRoot(petController);
-                petController.SetPetFromVariantId(skinOpposingPet.Value, true);
+                petController.SetPetFromVariantId(targetVariantId, true);
 
                 Actor actor = petController.GetComponentInParent<Actor>();
                 actor?.UpdatePetComponents();
                 petController.CreatePetObject();
             }
 
-            private static void RefreshOpposingPetBodiesInScene()
+            private static void RefreshConfiguredPetBodiesInScene(Player.Side? targetSide = null)
             {
-                if (skinOpposingPet.Value < 0)
+                if (targetSide.HasValue)
+                {
+                    if (GetConfiguredPetVariantId(targetSide.Value) < 0)
+                    {
+                        return;
+                    }
+                }
+                else if (skinPet.Value < 0 && skinOpposingPet.Value < 0)
                 {
                     return;
                 }
@@ -2537,7 +2609,12 @@ namespace HsMod
 
                 foreach (PetControllerGame petController in petControllers)
                 {
-                    RefreshOpposingPetBody(petController);
+                    if (targetSide.HasValue && GetPetControllerSide(petController) != targetSide.Value)
+                    {
+                        continue;
+                    }
+
+                    RefreshConfiguredPetBody(petController);
                 }
             }
 
@@ -2594,7 +2671,7 @@ namespace HsMod
                 try
                 {
                     UpdatePetRoot(__instance);
-                    RefreshOpposingPetBody(__instance);
+                    RefreshConfiguredPetBody(__instance);
                 }
                 catch (Exception ex)
                 {
@@ -2611,10 +2688,7 @@ namespace HsMod
                     if (TryGetPetCornerSide(corner, out Player.Side side))
                     {
                         RefreshPetCorner(__instance, corner, side);
-                        if (side == Player.Side.OPPOSING)
-                        {
-                            RefreshOpposingPetBodiesInScene();
-                        }
+                        RefreshConfiguredPetBodiesInScene(side);
                     }
                 }
                 catch (Exception ex)
