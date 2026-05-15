@@ -151,6 +151,7 @@ namespace HsMod
         public static ShowFPS showFPS;
         public static Dictionary<int, int> HeroesMapping = new Dictionary<int, int>();
         public static Dictionary<string, string> HeroesPowerMapping = new Dictionary<string, string>();
+        private static readonly System.Random SkinMappingRandom = new System.Random();
 
         public static ConfigEntry<bool> isAutoRedundantNDE;
 
@@ -499,30 +500,67 @@ namespace HsMod
         {
             string file = Path.Combine(BepInEx.Paths.ConfigPath, "HsSkins.cfg");
             HeroesMapping.Clear();
-            if (File.Exists(file))
-            {
-                foreach (string line in File.ReadLines(file))
-                {
-                    if (line.StartsWith("#"))
-                        continue;
-                    else
-                    {
-                        string[] parts = line.Split(':');
-                        if (parts.Length == 2)
-                        {
-                            if (!HeroesMapping.ContainsKey(int.Parse(parts[0].Trim())))
-                            {
-                                string[] skins = parts[1].Split(',');
-                                HeroesMapping.Add(int.Parse(parts[0].Trim()), int.Parse(skins[new System.Random().Next(skins.Length)].Trim()));
-                            }
-                        }
-                    }
-                }
-            }
-            else
+            if (!File.Exists(file))
             {
                 string newConfigFile = LocalizationManager.GetLangValue("HsSkins.cfg");
                 File.WriteAllText(file, newConfigFile);
+                return;
+            }
+
+            int lineNumber = 0;
+            foreach (string rawLine in File.ReadLines(file))
+            {
+                lineNumber++;
+                string line = rawLine.Trim();
+                if (string.IsNullOrEmpty(line) || line.StartsWith("#"))
+                {
+                    continue;
+                }
+
+                int commentIndex = line.IndexOf('#');
+                if (commentIndex >= 0)
+                {
+                    line = line.Substring(0, commentIndex).Trim();
+                }
+                if (string.IsNullOrEmpty(line))
+                {
+                    continue;
+                }
+
+                string[] parts = line.Split(new[] { ':' }, 2);
+                if (parts.Length != 2 || !int.TryParse(parts[0].Trim(), out int sourceSkinId))
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"Invalid HsSkins.cfg line {lineNumber}: {rawLine}");
+                    continue;
+                }
+
+                if (HeroesMapping.ContainsKey(sourceSkinId))
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"Duplicate HsSkins.cfg source {sourceSkinId} at line {lineNumber}, ignored.");
+                    continue;
+                }
+
+                var targetSkinIds = new List<int>();
+                foreach (string rawTarget in parts[1].Split(','))
+                {
+                    if (int.TryParse(rawTarget.Trim(), out int targetSkinId))
+                    {
+                        targetSkinIds.Add(targetSkinId);
+                    }
+                }
+
+                if (targetSkinIds.Count == 0)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"No valid target skin id in HsSkins.cfg line {lineNumber}: {rawLine}");
+                    continue;
+                }
+
+                int selectedIndex;
+                lock (SkinMappingRandom)
+                {
+                    selectedIndex = SkinMappingRandom.Next(targetSkinIds.Count);
+                }
+                HeroesMapping.Add(sourceSkinId, targetSkinIds[selectedIndex]);
             }
         }
 

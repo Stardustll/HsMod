@@ -819,8 +819,9 @@ namespace HsMod
                     list.Insert(num++, new CodeInstruction(OpCodes.Brfalse_S, label));
                     list.Insert(num++, new CodeInstruction(OpCodes.Ldarg_0));
                     list.Insert(num++, new CodeInstruction(OpCodes.Ldarg_0));
+                    list.Insert(num++, new CodeInstruction(OpCodes.Ldarg_0));
                     list.Insert(num++, new CodeInstruction(OpCodes.Ldfld, typeof(PackOpening).GetField("m_director", BindingFlags.Instance | BindingFlags.NonPublic)));
-                    list.Insert(num++, new CodeInstruction(OpCodes.Callvirt, new Func<PackOpeningDirector, IEnumerator>(PackOpeningDirectorPatch.ForceRevealAllCards).Method));
+                    list.Insert(num++, new CodeInstruction(OpCodes.Call, new Func<PackOpening, PackOpeningDirector, IEnumerator>(PackOpeningDirectorPatch.OpenPackFast).Method));
                     list.Insert(num++, new CodeInstruction(OpCodes.Call, typeof(MonoBehaviour).GetMethod("StartCoroutine", BindingFlags.Instance | BindingFlags.Public, null, new Type[1]
                     {
                     typeof(IEnumerator)
@@ -4201,6 +4202,69 @@ namespace HsMod
         public static bool m_WaitingForAllCardsRevealed;
 
         private static readonly FieldInfo m_hiddenCardsInfo = typeof(PackOpeningDirector).GetField("m_hiddenCards", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo m_selectedPackInfo = typeof(PackOpening).GetField("m_selectedPack", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo canOpenPackAutomaticallyInfo = typeof(PackOpening).GetMethod("CanOpenPackAutomatically", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo isMassPackOpenableInfo = typeof(PackOpening).GetMethod("IsMassPackOpenable", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly MethodInfo triggerMassPackOpeningWithSpaceBarInfo = typeof(PackOpening).GetMethod("TriggerMassPackOpeningWithSpaceBar", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        public static IEnumerator OpenPackFast(PackOpening packOpening, PackOpeningDirector director)
+        {
+            if (TryTriggerNativeMassPackOpening(packOpening))
+            {
+                yield break;
+            }
+
+            if (director == null)
+            {
+                yield break;
+            }
+
+            IEnumerator fallback = ForceRevealAllCards(director);
+            while (fallback != null && fallback.MoveNext())
+            {
+                yield return fallback.Current;
+            }
+        }
+
+        private static bool TryTriggerNativeMassPackOpening(PackOpening packOpening)
+        {
+            try
+            {
+                if (packOpening == null || (!packOpening.MassPackOpeningEnabled() && !packOpening.MassCatchupPackOpeningEnabled()))
+                {
+                    return false;
+                }
+
+                if (canOpenPackAutomaticallyInfo != null && canOpenPackAutomaticallyInfo.Invoke(packOpening, null) is bool canOpen && !canOpen)
+                {
+                    return false;
+                }
+
+                object selectedPack = m_selectedPackInfo?.GetValue(packOpening);
+                if (selectedPack == null)
+                {
+                    return false;
+                }
+
+                if (isMassPackOpenableInfo != null && isMassPackOpenableInfo.Invoke(packOpening, new[] { selectedPack }) is bool massOpenable && !massOpenable)
+                {
+                    return false;
+                }
+
+                if (triggerMassPackOpeningWithSpaceBarInfo == null)
+                {
+                    return false;
+                }
+
+                triggerMassPackOpeningWithSpaceBarInfo.Invoke(packOpening, null);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"Native mass pack opening fallback: {ex.Message}");
+                return false;
+            }
+        }
 
         public static IEnumerator ForceRevealAllCards(this PackOpeningDirector __instance)
         {

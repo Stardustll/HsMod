@@ -54,6 +54,18 @@ namespace HsMod
         public static bool pluginConfigLock;
         public static bool updateLock;
 
+        private static bool IsTruthyQuery(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            return value.Equals("1", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("y", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("force", StringComparison.OrdinalIgnoreCase);
+        }
+
         private enum SkinImageKind
         {
             Card,
@@ -218,9 +230,10 @@ namespace HsMod
                 finally
                 {
                     pluginConfigLock = false;
+                    context.Response.ContentType = "application/json; charset=UTF-8";
                     using (var writer = new StreamWriter(context.Response.OutputStream))
                     {
-                        await writer.WriteLineAsync($"{{\"status\":{context.Response.StatusCode},\"output\":\"{output}\"}}");
+                        await writer.WriteLineAsync(Newtonsoft.Json.JsonConvert.SerializeObject(new { status = context.Response.StatusCode, output = output }));
                     }
                 }
             }
@@ -277,10 +290,44 @@ namespace HsMod
                 finally
                 {
                     updateLock = false;
+                    context.Response.ContentType = "application/json; charset=UTF-8";
                     using (var writer = new StreamWriter(context.Response.OutputStream))
                     {
-                        await writer.WriteLineAsync($"{{\"status\":{context.Response.StatusCode},\"output\":\"{output}\"}}");
+                        await writer.WriteLineAsync(Newtonsoft.Json.JsonConvert.SerializeObject(new { status = context.Response.StatusCode, output = output }));
                     }
+                }
+            }
+            else if (rawUrLower == "/api/skins" && request.HttpMethod == "GET")
+            {
+                context.Response.ContentType = "application/json; charset=UTF-8";
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteAsync(WebApi.GetSkinCatalogJson(request.QueryString["type"], IsTruthyQuery(request.QueryString["refresh"])));
+                }
+            }
+            else if (rawUrLower == "/api/config" && request.HttpMethod == "GET")
+            {
+                context.Response.ContentType = "application/json; charset=UTF-8";
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteAsync(WebApi.GetConfigCatalogJson(IsTruthyQuery(request.QueryString["refresh"])));
+                }
+            }
+            else if (rawUrLower == "/api/packs" && request.HttpMethod == "GET")
+            {
+                context.Response.ContentType = "application/json; charset=UTF-8";
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteAsync(WebApi.GetPackCatalogJson(IsTruthyQuery(request.QueryString["refresh"])));
+                }
+            }
+            else if (rawUrLower == "/api/cache/clear" && request.HttpMethod == "POST")
+            {
+                WebApi.InvalidateApiCache(request.QueryString["prefix"]);
+                context.Response.ContentType = "application/json; charset=UTF-8";
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(new { success = true, output = "cache cleared" }));
                 }
             }
             else if (rawUrLower == "/skinimage")

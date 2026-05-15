@@ -22,6 +22,11 @@ namespace HsMod
         private static readonly Dictionary<long, ZeroDollarShoppingCandidate> _zeroDollarShoppingCandidateMap = new Dictionary<long, ZeroDollarShoppingCandidate>();
         private static int _zeroDollarShoppingSelectedIndex;
         private static bool _zeroDollarShoppingPanelModeActive;
+        private static int _zeroDollarShoppingPanelGeneration;
+        private static readonly TimeSpan ZeroDollarShoppingPurchaseSuppressWindow = TimeSpan.FromSeconds(2);
+        private static DateTime _zeroDollarShoppingSuppressOriginalPurchaseUntilUtc = DateTime.MinValue;
+        private static long _zeroDollarShoppingLastHandledBundleId;
+        private static string _zeroDollarShoppingLastHandledTitle;
 
         private sealed class ZeroDollarShoppingCandidate
         {
@@ -29,6 +34,8 @@ namespace HsMod
             public string Title;
             public string Description;
             public CurrencyType CurrencyType;
+            public string PriceText;
+            public string Source;
             public Action PurchaseAction;
         }
 
@@ -830,7 +837,9 @@ namespace HsMod
                                 selectedBundle?.Title,
                                 selectedBundle?.Description,
                                 CurrencyType.GOLD,
-                                () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, CurrencyType.GOLD, 1))))
+                                () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, CurrencyType.GOLD, 1)),
+                                "无显式金币价格",
+                                $"{t}[true/no-price]"))
                             {
                                 foundAny = true;
                                 markedCurrentBundle = true;
@@ -873,7 +882,9 @@ namespace HsMod
                                     selectedBundle?.Title,
                                     selectedBundle?.Description,
                                     selectedCurrency,
-                                    () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1))))
+                                    () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1)),
+                                    $"0 {selectedCurrency}",
+                                    $"{t}[true/free-price]"))
                                 {
                                     foundAny = true;
                                     markedCurrentBundle = true;
@@ -937,7 +948,9 @@ namespace HsMod
                                     selectedBundle?.Title,
                                     selectedBundle?.Description,
                                     selectedCurrency,
-                                    () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1))))
+                                    () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1)),
+                                    "隐藏商品无显式价格",
+                                    $"{t}[hidden/no-price]"))
                                 {
                                     foundAny = true;
                                     markedCurrentBundle = true;
@@ -974,7 +987,9 @@ namespace HsMod
                                     selectedBundle?.Title,
                                     selectedBundle?.Description,
                                     selectedCurrency,
-                                    () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1))))
+                                    () => StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(selectedBundle, selectedCurrency, 1)),
+                                    $"0 {selectedCurrency}",
+                                    $"{t}[hidden/free-price]"))
                                 {
                                     foundAny = true;
                                     markedCurrentBundle = true;
@@ -1020,24 +1035,36 @@ namespace HsMod
             string title,
             string description,
             CurrencyType currencyType,
-            Action purchaseAction)
+            Action purchaseAction,
+            string priceText = null,
+            string source = null)
         {
+            if (bundleId == 0)
+            {
+                return false;
+            }
+
             if (!candidateBundleIds.Add(bundleId))
             {
+                Utils.MyLogger(LogLevel.Info, $"ZeroDollar Candidate duplicate skipped id={bundleId} title={title}");
                 return false;
             }
 
             var normalizedTitle = string.IsNullOrWhiteSpace(title) ? "(Unnamed Bundle)" : title.Trim();
             var normalizedDescription = string.IsNullOrWhiteSpace(description) ? string.Empty : description.Trim();
+            var normalizedPriceText = string.IsNullOrWhiteSpace(priceText) ? $"0 {currencyType}" : priceText.Trim();
+            var normalizedSource = string.IsNullOrWhiteSpace(source) ? "scan" : source.Trim();
             candidates.Add(new ZeroDollarShoppingCandidate
             {
                 BundleId = bundleId,
                 Title = normalizedTitle,
                 Description = normalizedDescription,
                 CurrencyType = currencyType,
+                PriceText = normalizedPriceText,
+                Source = normalizedSource,
                 PurchaseAction = purchaseAction
             });
-            Utils.MyLogger(LogLevel.Warning, $"ZeroDollar Candidate id={bundleId} title={normalizedTitle} currency={currencyType}");
+            Utils.MyLogger(LogLevel.Warning, $"ZeroDollar Candidate id={bundleId} title={normalizedTitle} currency={currencyType} source={normalizedSource}");
             return true;
         }
 
@@ -1062,9 +1089,16 @@ namespace HsMod
                 return;
             }
 
+            var panelGeneration = ++_zeroDollarShoppingPanelGeneration;
+            _zeroDollarShoppingPanelWatchCoroutine = null;
             _zeroDollarShoppingPanelModeActive = true;
             StoreManager.OpenShopThen((bool success) =>
             {
+                if (!_zeroDollarShoppingPanelModeActive || panelGeneration != _zeroDollarShoppingPanelGeneration)
+                {
+                    return;
+                }
+
                 if (!success)
                 {
                     CleanupZeroDollarShoppingPanelState(clearCandidates: false);
@@ -1072,18 +1106,19 @@ namespace HsMod
                     return;
                 }
 
-                Plugin.Instance.StartCoroutine(OpenZeroDollarShoppingPanelWhenReady(panelProductData, _zeroDollarShoppingSelectedIndex));
+                Plugin.Instance.StartCoroutine(OpenZeroDollarShoppingPanelWhenReady(panelProductData, _zeroDollarShoppingSelectedIndex, panelGeneration));
             }, false);
         }
 
         private static IEnumerator OpenZeroDollarShoppingPanelWhenReady(
             Hearthstone.DataModels.ProductDataModel productData,
-            int selectedIndex)
+            int selectedIndex,
+            int panelGeneration)
         {
             const int maxAttempts = 240;
             for (var i = 0; i < maxAttempts; i++)
             {
-                if (!_zeroDollarShoppingPanelModeActive)
+                if (!_zeroDollarShoppingPanelModeActive || panelGeneration != _zeroDollarShoppingPanelGeneration)
                 {
                     yield break;
                 }
@@ -1099,7 +1134,7 @@ namespace HsMod
 
                     if (_zeroDollarShoppingPanelWatchCoroutine == null && Plugin.Instance != null)
                     {
-                        _zeroDollarShoppingPanelWatchCoroutine = Plugin.Instance.StartCoroutine(WatchZeroDollarShoppingPanelClose());
+                        _zeroDollarShoppingPanelWatchCoroutine = Plugin.Instance.StartCoroutine(WatchZeroDollarShoppingPanelClose(panelGeneration));
                     }
 
                     UIStatus.Get().AddInfo($"已打开零元购原生面板，共 {_zeroDollarShoppingCandidates.Count} 项。", 8f);
@@ -1110,16 +1145,19 @@ namespace HsMod
                 yield return null;
             }
 
-            CleanupZeroDollarShoppingPanelState(clearCandidates: false);
-            UIStatus.Get().AddInfo("打开零元购原生面板超时。");
+            if (_zeroDollarShoppingPanelModeActive && panelGeneration == _zeroDollarShoppingPanelGeneration)
+            {
+                CleanupZeroDollarShoppingPanelState(clearCandidates: false);
+                UIStatus.Get().AddInfo("打开零元购原生面板超时。");
+            }
         }
 
-        private static IEnumerator WatchZeroDollarShoppingPanelClose()
+        private static IEnumerator WatchZeroDollarShoppingPanelClose(int panelGeneration)
         {
             var seenOpen = false;
             try
             {
-                while (_zeroDollarShoppingPanelModeActive)
+                while (_zeroDollarShoppingPanelModeActive && panelGeneration == _zeroDollarShoppingPanelGeneration)
                 {
                     var controller = Shop.Get()?.ProductPageController;
                     if (controller != null && controller.IsOpen)
@@ -1147,7 +1185,10 @@ namespace HsMod
             }
             finally
             {
-                _zeroDollarShoppingPanelWatchCoroutine = null;
+                if (panelGeneration == _zeroDollarShoppingPanelGeneration)
+                {
+                    _zeroDollarShoppingPanelWatchCoroutine = null;
+                }
             }
         }
 
@@ -1327,7 +1368,10 @@ namespace HsMod
         {
             var title = string.IsNullOrWhiteSpace(candidate.Title) ? $"候选 {index + 1}" : candidate.Title.Trim();
             var description = string.IsNullOrWhiteSpace(candidate.Description) ? "无描述" : candidate.Description.Trim();
+            var source = string.IsNullOrWhiteSpace(candidate.Source) ? "scan" : candidate.Source.Trim();
+            var priceText = string.IsNullOrWhiteSpace(candidate.PriceText) ? $"0 {candidate.CurrencyType}" : candidate.PriceText.Trim();
             var idTitle = $"ID {candidate.BundleId}";
+            var detail = $"{description}\n\n序号：{index + 1}/{_zeroDollarShoppingCandidates.Count}\nID：{candidate.BundleId}\n来源：{source}\n价格：{priceText}";
             return new Hearthstone.DataModels.ProductDataModel
             {
                 PmtId = candidate.BundleId,
@@ -1335,10 +1379,10 @@ namespace HsMod
                 ShortName = idTitle,
                 VariantName = idTitle,
                 DescriptionHeader = title,
-                Description = description,
-                FullDescription = description,
+                Description = detail,
+                FullDescription = detail,
                 Availability = ProductAvailability.CAN_PURCHASE,
-                Prices = BuildZeroDollarShoppingPanelPriceList(candidate.CurrencyType),
+                Prices = BuildZeroDollarShoppingPanelPriceList(candidate.CurrencyType, priceText),
                 Tags = templateVariant?.Tags,
                 Items = templateVariant?.Items,
                 RequiredGamemodes = templateVariant?.RequiredGamemodes,
@@ -1349,7 +1393,7 @@ namespace HsMod
             };
         }
 
-        private static Hearthstone.UI.DataModelList<Hearthstone.DataModels.PriceDataModel> BuildZeroDollarShoppingPanelPriceList(CurrencyType currencyType)
+        private static Hearthstone.UI.DataModelList<Hearthstone.DataModels.PriceDataModel> BuildZeroDollarShoppingPanelPriceList(CurrencyType currencyType, string displayText = null)
         {
             var resolvedCurrency = currencyType == CurrencyType.NONE ? CurrencyType.GOLD : currencyType;
             var prices = new Hearthstone.UI.DataModelList<Hearthstone.DataModels.PriceDataModel>(1);
@@ -1357,7 +1401,7 @@ namespace HsMod
             {
                 Currency = resolvedCurrency,
                 Amount = 0f,
-                DisplayText = "免费!",
+                DisplayText = string.IsNullOrWhiteSpace(displayText) ? "免费!" : displayText,
                 OriginalAmount = 0f,
                 OriginalDisplayText = string.Empty,
                 OnSale = false
@@ -1378,6 +1422,10 @@ namespace HsMod
                 {
                     _zeroDollarShoppingCandidateMap.Add(candidate.BundleId, candidate);
                 }
+                else
+                {
+                    MyLogger(LogLevel.Info, $"ZeroDollar Candidate duplicate map entry ignored id={candidate.BundleId} title={candidate.Title}");
+                }
             }
         }
 
@@ -1393,24 +1441,166 @@ namespace HsMod
             }
         }
 
+        private static bool TryGetZeroDollarShoppingCandidateByPmtId(
+            long pmtId,
+            string source,
+            out ZeroDollarShoppingCandidate candidate,
+            out string resolvedSource)
+        {
+            candidate = null;
+            resolvedSource = null;
+
+            if (pmtId == 0)
+            {
+                return false;
+            }
+
+            if (!_zeroDollarShoppingCandidateMap.TryGetValue(pmtId, out candidate))
+            {
+                return false;
+            }
+
+            resolvedSource = source;
+            var selectedIndex = _zeroDollarShoppingCandidates.FindIndex(c => c != null && c.BundleId == pmtId);
+            if (selectedIndex >= 0)
+            {
+                _zeroDollarShoppingSelectedIndex = selectedIndex;
+            }
+            return true;
+        }
+
+        private static bool IsZeroDollarShoppingSyntheticPanelProduct(Hearthstone.DataModels.ProductDataModel product)
+        {
+            if (product == null)
+            {
+                return false;
+            }
+
+            if (string.Equals(product.Name, "零元购扫描结果", StringComparison.Ordinal)
+                || string.Equals(product.ShortName, "零元购", StringComparison.Ordinal)
+                || string.Equals(product.VariantName, "零元购", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            var variants = product.Variants;
+            if (variants == null || variants.Count == 0 || _zeroDollarShoppingCandidateMap.Count == 0)
+            {
+                return false;
+            }
+
+            var matchedVariantCount = 0;
+            foreach (var variant in variants)
+            {
+                if (variant != null && _zeroDollarShoppingCandidateMap.ContainsKey(variant.PmtId))
+                {
+                    matchedVariantCount++;
+                }
+            }
+
+            return matchedVariantCount > 0 && matchedVariantCount == variants.Count;
+        }
+
+        private static bool IsRecentlyHandledZeroDollarShoppingPanelProduct(Hearthstone.DataModels.ProductDataModel product)
+        {
+            if (product == null || _zeroDollarShoppingLastHandledBundleId == 0)
+            {
+                return false;
+            }
+
+            if (IsZeroDollarShoppingSyntheticPanelProduct(product))
+            {
+                return true;
+            }
+
+            if (product.PmtId != _zeroDollarShoppingLastHandledBundleId)
+            {
+                return false;
+            }
+
+            var idTitle = $"ID {_zeroDollarShoppingLastHandledBundleId}";
+            if (string.Equals(product.Name, idTitle, StringComparison.Ordinal)
+                || string.Equals(product.ShortName, idTitle, StringComparison.Ordinal)
+                || string.Equals(product.VariantName, idTitle, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            var description = product.FullDescription ?? product.Description ?? string.Empty;
+            return description.Contains($"ID：{_zeroDollarShoppingLastHandledBundleId}")
+                && description.Contains("来源：")
+                && description.Contains("价格：");
+        }
+
+        private static bool TryResolveZeroDollarShoppingCandidate(
+            Hearthstone.DataModels.ProductDataModel product,
+            out ZeroDollarShoppingCandidate candidate,
+            out string resolvedSource)
+        {
+            candidate = null;
+            resolvedSource = null;
+
+            if (_zeroDollarShoppingCandidates.Count == 0)
+            {
+                return false;
+            }
+
+            if (_zeroDollarShoppingCandidateMap.Count != _zeroDollarShoppingCandidates.Count)
+            {
+                RebuildZeroDollarShoppingCandidateMap();
+            }
+
+            var selectedVariant = Shop.Get()?.ProductPageController?.CurrentProductPage?.GetSelectedVariant();
+            if (selectedVariant != null
+                && TryGetZeroDollarShoppingCandidateByPmtId(selectedVariant.PmtId, "selected-variant", out candidate, out resolvedSource))
+            {
+                return true;
+            }
+
+            if (product != null
+                && TryGetZeroDollarShoppingCandidateByPmtId(product.PmtId, "purchase-product", out candidate, out resolvedSource))
+            {
+                return true;
+            }
+
+            if (IsZeroDollarShoppingSyntheticPanelProduct(product))
+            {
+                var fallbackIndex = Mathf.Clamp(_zeroDollarShoppingSelectedIndex, 0, _zeroDollarShoppingCandidates.Count - 1);
+                candidate = _zeroDollarShoppingCandidates[fallbackIndex];
+                resolvedSource = "selected-index-fallback";
+                return candidate != null;
+            }
+
+            return false;
+        }
+
         public static bool TryHandleZeroDollarShoppingPanelPurchase(
             Hearthstone.DataModels.ProductDataModel product,
             Hearthstone.DataModels.PriceDataModel _price,
             int _quantity)
         {
-            if (!_zeroDollarShoppingPanelModeActive || product == null)
+            if (product == null)
             {
                 return false;
             }
 
-            ZeroDollarShoppingCandidate candidate = null;
-            var selectedVariant = Shop.Get()?.ProductPageController?.CurrentProductPage?.GetSelectedVariant();
-            if (selectedVariant != null)
+            var now = DateTime.UtcNow;
+            if (!_zeroDollarShoppingPanelModeActive)
             {
-                _zeroDollarShoppingCandidateMap.TryGetValue(selectedVariant.PmtId, out candidate);
+                if (now < _zeroDollarShoppingSuppressOriginalPurchaseUntilUtc
+                    && IsRecentlyHandledZeroDollarShoppingPanelProduct(product))
+                {
+                    var lastTitle = string.IsNullOrWhiteSpace(_zeroDollarShoppingLastHandledTitle)
+                        ? $"ID {_zeroDollarShoppingLastHandledBundleId}"
+                        : _zeroDollarShoppingLastHandledTitle;
+                    UIStatus.Get().AddInfo($"已忽略重复购买点击：{lastTitle}（id={_zeroDollarShoppingLastHandledBundleId}）", 4f);
+                    return true;
+                }
+
+                return false;
             }
 
-            if (candidate == null && !_zeroDollarShoppingCandidateMap.TryGetValue(product.PmtId, out candidate))
+            if (!TryResolveZeroDollarShoppingCandidate(product, out var candidate, out var resolvedSource))
             {
                 return false;
             }
@@ -1423,6 +1613,11 @@ namespace HsMod
                 }
                 else
                 {
+                    _zeroDollarShoppingLastHandledBundleId = candidate.BundleId;
+                    _zeroDollarShoppingLastHandledTitle = candidate.Title;
+                    _zeroDollarShoppingSuppressOriginalPurchaseUntilUtc = now.Add(ZeroDollarShoppingPurchaseSuppressWindow);
+                    MyLogger(LogLevel.Info, $"ZeroDollar PurchasePanel selected id={candidate.BundleId} title={candidate.Title} currency={candidate.CurrencyType} source={candidate.Source} resolve={resolvedSource}");
+                    CleanupZeroDollarShoppingPanelState(clearCandidates: false);
                     candidate.PurchaseAction.Invoke();
                     UIStatus.Get().AddInfo($"已尝试购买：{candidate.Title}（id={candidate.BundleId}）", 10f);
                     UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60f);
