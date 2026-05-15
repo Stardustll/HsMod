@@ -1,4 +1,5 @@
-﻿using System;
+using Blizzard.T5.Core;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -48,9 +49,10 @@ namespace HsMod
             typeof(GameObject)
         };
         private static readonly string[] AssetReferenceMemberHints = { "Asset", "Prefab", "Frame", "Texture", "Sprite", "Material", "Preview", "Thumbnail", "Icon" };
-        private static readonly string[] CardBackMemberHints = { "CardBack", "Texture", "Material", "Frame", "Prefab", "Asset", "Highlight" };
-        private static readonly string[] BattlegroundsBoardMemberHints = { "Board", "Texture", "Prefab", "Asset", "Preview", "Thumbnail", "FullBoard", "FullTavern", "Layout" };
-        private static readonly string[] BattlegroundsFinisherMemberHints = { "Finisher", "Texture", "Prefab", "Asset", "Preview", "Thumbnail", "Material", "Effect" };
+        private static readonly string[] PetMemberHints = { "Pet", "Icon", "Portrait", "Texture", "Sprite", "Material", "Prefab", "Asset", "Card" };
+        private static readonly string[] CardBackMemberHints = { "CardBack", "Texture", "Material", "Frame", "Prefab", "Asset", "Highlight", "Back", "Image", "Portrait" };
+        private static readonly string[] BattlegroundsBoardMemberHints = { "Board", "Texture", "Prefab", "Asset", "Preview", "Thumbnail", "FullBoard", "FullTavern", "Layout", "Details", "Movie", "Image" };
+        private static readonly string[] BattlegroundsFinisherMemberHints = { "Finisher", "Texture", "Prefab", "Asset", "Preview", "Thumbnail", "Material", "Effect", "Details", "Movie", "Image", "Gameplay" };
         public static bool pluginConfigLock;
         public static bool updateLock;
 
@@ -442,6 +444,9 @@ namespace HsMod
 
             context.Response.StatusCode = 404;
             context.Response.ContentType = "text/plain; charset=UTF-8";
+            Utils.MyLogger(
+                BepInEx.Logging.LogLevel.Warning,
+                $"Skin image not found type={kind} id={dbfId} card={cardStringId} premium={premium}: {exportResult?.ErrorMessage}");
             using (var writer = new StreamWriter(context.Response.OutputStream))
             {
                 await writer.WriteAsync(string.IsNullOrEmpty(exportResult?.ErrorMessage) ? "Skin image not found." : exportResult.ErrorMessage);
@@ -597,7 +602,7 @@ namespace HsMod
                 }
 
                 string cachePath = Path.Combine(SkinImageCacheDirectory, BuildSkinImageCacheKey(SkinImageKind.Pet, dbfId, resolvedCardId, premium) + ".png");
-                Texture texture = TryResolveCardArtTexture(resolvedCardId, premium, out string textureError);
+                Texture texture = TryResolvePetTexture(dbfId, resolvedCardId, premium, out string textureError);
                 if (texture == null)
                 {
                     result.ErrorMessage = textureError;
@@ -860,6 +865,46 @@ namespace HsMod
             }
         }
 
+        private static Texture TryResolvePetTexture(string dbfId, string cardStringId, TAG_PREMIUM premium, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            var targets = new List<object>();
+
+            if (int.TryParse(dbfId, out int variantId))
+            {
+                try
+                {
+                    object petRecord = GameDbf.PetVariant.GetRecord(variantId);
+                    if (petRecord != null)
+                    {
+                        targets.Add(petRecord);
+                        Texture petIconTexture = TryLoadTextureFromNamedStringMembers(petRecord, "PetIcon", "Icon", "Texture", "Portrait", "Prefab");
+                        if (petIconTexture != null)
+                            return petIconTexture;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryResolvePetTexture record error: {ex.Message}");
+                }
+            }
+
+            Texture texture = TryResolveTextureFromSearchTargets(targets, PetMemberHints, premium, out errorMessage);
+            if (texture != null)
+                return texture;
+
+            texture = TryResolveCardArtTexture(cardStringId, premium, out string cardArtError);
+            if (texture != null)
+                return texture;
+
+            errorMessage = !string.IsNullOrEmpty(errorMessage)
+                ? errorMessage + "; card fallback: " + cardArtError
+                : cardArtError;
+            if (string.IsNullOrEmpty(errorMessage))
+                errorMessage = "Pet texture not found.";
+            return null;
+        }
+
         private static Texture TryResolveCardBackTexture(int dbfId, out string errorMessage)
         {
             errorMessage = string.Empty;
@@ -871,7 +916,12 @@ namespace HsMod
                 object cardBackDataMap = TryGetMemberValue(cardBackManager, "m_cardBackData");
                 object cardBackData = TryGetIndexedValue(cardBackDataMap, dbfId);
                 if (cardBackData != null)
+                {
                     targets.Add(cardBackData);
+                    Texture cardBackDataTexture = TryLoadTextureFromNamedStringMembers(cardBackData, "PrefabName", "Prefab", "Texture", "CardBack");
+                    if (cardBackDataTexture != null)
+                        return cardBackDataTexture;
+                }
             }
             catch (Exception ex)
             {
@@ -882,7 +932,12 @@ namespace HsMod
             {
                 object cardBackRecord = GameDbf.CardBack.GetRecord(dbfId);
                 if (cardBackRecord != null)
+                {
                     targets.Add(cardBackRecord);
+                    Texture cardBackRecordTexture = TryLoadTextureFromNamedStringMembers(cardBackRecord, "PrefabName", "Prefab", "Texture", "CardBack", "HighResTexture", "Thumbnail");
+                    if (cardBackRecordTexture != null)
+                        return cardBackRecordTexture;
+                }
             }
             catch (Exception ex)
             {
@@ -913,7 +968,12 @@ namespace HsMod
             {
                 object boardRecord = GameDbf.BattlegroundsBoardSkin.GetRecord(dbfId);
                 if (boardRecord != null)
+                {
                     targets.Add(boardRecord);
+                    Texture boardTexture = TryLoadTextureFromNamedStringMembers(boardRecord, "DetailsTexture", "FullTavernBoardPrefab", "DetailsMovie", "Preview", "Thumbnail", "Texture", "Prefab");
+                    if (boardTexture != null)
+                        return boardTexture;
+                }
             }
             catch (Exception ex)
             {
@@ -944,7 +1004,12 @@ namespace HsMod
             {
                 object finisherRecord = GameDbf.BattlegroundsFinisher.GetRecord(dbfId);
                 if (finisherRecord != null)
+                {
                     targets.Add(finisherRecord);
+                    Texture finisherTexture = TryLoadTextureFromNamedStringMembers(finisherRecord, "DetailsTexture", "GameplaySettings", "DetailsMovie", "Preview", "Thumbnail", "Texture", "Prefab");
+                    if (finisherTexture != null)
+                        return finisherTexture;
+                }
             }
             catch (Exception ex)
             {
@@ -1023,7 +1088,7 @@ namespace HsMod
 
                 if (ShouldTryLoadAssetReference(property.Name, value))
                 {
-                    texture = TryLoadTextureFromAssetReference(value);
+                    texture = TryLoadTextureFromAnyAssetValue(value);
                     if (texture != null)
                         return texture;
                 }
@@ -1050,7 +1115,7 @@ namespace HsMod
 
                 if (ShouldTryLoadAssetReference(field.Name, value))
                 {
-                    texture = TryLoadTextureFromAssetReference(value);
+                    texture = TryLoadTextureFromAnyAssetValue(value);
                     if (texture != null)
                         return texture;
                 }
@@ -1083,7 +1148,7 @@ namespace HsMod
 
                 if (ShouldTryLoadAssetReference(method.Name, returnValue))
                 {
-                    texture = TryLoadTextureFromAssetReference(returnValue);
+                    texture = TryLoadTextureFromAnyAssetValue(returnValue);
                     if (texture != null)
                         return texture;
                 }
@@ -1110,6 +1175,45 @@ namespace HsMod
             return LooksLikeAssetReferenceType(memberType);
         }
 
+        private static Texture TryLoadTextureFromNamedStringMembers(object target, params string[] memberNames)
+        {
+            if (target == null || memberNames == null || memberNames.Length == 0)
+                return null;
+
+            foreach (string memberName in memberNames)
+            {
+                object value = TryGetMemberValue(target, memberName);
+                Texture texture = TryLoadTextureFromAnyAssetValue(value);
+                if (texture != null)
+                    return texture;
+            }
+
+            return null;
+        }
+
+        private static Texture TryLoadTextureFromAnyAssetValue(object value)
+        {
+            if (value == null)
+                return null;
+
+            Texture texture = TryExtractTexture(value);
+            if (texture != null)
+                return texture;
+
+            texture = TryLoadTextureFromAssetReference(value);
+            if (texture != null)
+                return texture;
+
+            string assetString = value as string;
+            if (string.IsNullOrWhiteSpace(assetString))
+                assetString = value.ToString();
+
+            if (string.IsNullOrWhiteSpace(assetString))
+                return null;
+
+            return TryLoadTextureFromAssetString(assetString.Trim());
+        }
+
         private static bool ShouldTryLoadAssetReference(string memberName, object value)
         {
             if (value == null)
@@ -1118,7 +1222,10 @@ namespace HsMod
             if (LooksLikeAssetReferenceType(value.GetType()))
                 return true;
 
-            return ContainsHint(memberName, AssetReferenceMemberHints);
+            if (ContainsHint(memberName, AssetReferenceMemberHints))
+                return true;
+
+            return value is string text && LooksLikeAssetReferenceString(text);
         }
 
         private static bool LooksLikeAssetReferenceType(Type type)
@@ -1129,6 +1236,27 @@ namespace HsMod
             string fullName = type.FullName ?? type.Name ?? string.Empty;
             return fullName.IndexOf("AssetReference", StringComparison.OrdinalIgnoreCase) >= 0
                 || fullName.IndexOf("AssetRef", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool LooksLikeAssetReferenceString(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            string text = value.Trim();
+            return text.IndexOf("/", StringComparison.Ordinal) >= 0
+                || text.IndexOf("\\", StringComparison.Ordinal) >= 0
+                || text.IndexOf(".", StringComparison.Ordinal) >= 0
+                || text.IndexOf("_", StringComparison.Ordinal) >= 0
+                || text.IndexOf("icon", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf("texture", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf("prefab", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf("portrait", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf("thumbnail", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.IndexOf("preview", StringComparison.OrdinalIgnoreCase) >= 0
+                || text.EndsWith("Texture", StringComparison.OrdinalIgnoreCase)
+                || text.EndsWith("Prefab", StringComparison.OrdinalIgnoreCase)
+                || text.EndsWith("Sprite", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool ContainsHint(string value, IEnumerable<string> hints)
@@ -1652,6 +1780,97 @@ namespace HsMod
             {
                 Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"TryLoadTextureFromAssetReference error: {ex.Message}");
                 return null;
+            }
+        }
+
+        private static Texture TryLoadTextureFromAssetString(string assetString)
+        {
+            if (string.IsNullOrWhiteSpace(assetString))
+                return null;
+
+            string normalized = assetString.Trim();
+            var candidateReferences = new List<object>();
+
+            try
+            {
+                AssetReference assetReference = AssetReference.CreateFromAssetString(normalized);
+                if (assetReference != null)
+                    candidateReferences.Add(assetReference);
+            }
+            catch
+            {
+            }
+
+            foreach (string candidate in BuildAssetStringCandidates(normalized))
+            {
+                try
+                {
+                    AssetReference assetReference = AssetReference.CreateFromAssetString(candidate);
+                    if (assetReference != null)
+                        candidateReferences.Add(assetReference);
+                }
+                catch
+                {
+                }
+            }
+
+            foreach (object candidateReference in candidateReferences)
+            {
+                Texture texture = TryLoadTextureFromAssetReference(candidateReference);
+                if (texture != null)
+                    return texture;
+            }
+
+            try
+            {
+                Texture resourceTexture = Resources.Load<Texture>(normalized);
+                if (resourceTexture != null)
+                    return resourceTexture;
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        private static IEnumerable<string> BuildAssetStringCandidates(string assetString)
+        {
+            if (string.IsNullOrWhiteSpace(assetString))
+                yield break;
+
+            string normalized = assetString.Trim().Replace('\\', '/');
+            yield return normalized;
+
+            int dotIndex = normalized.LastIndexOf('.');
+            if (dotIndex > 0)
+                yield return normalized.Substring(0, dotIndex);
+
+            string fileName = Path.GetFileName(normalized);
+            if (!string.IsNullOrWhiteSpace(fileName) && !string.Equals(fileName, normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return fileName;
+                int fileDotIndex = fileName.LastIndexOf('.');
+                if (fileDotIndex > 0)
+                    yield return fileName.Substring(0, fileDotIndex);
+            }
+
+            if (!normalized.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
+                && normalized.IndexOf("/", StringComparison.Ordinal) < 0)
+            {
+                yield return normalized + ".prefab";
+            }
+
+            if (!normalized.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                && normalized.IndexOf("/", StringComparison.Ordinal) < 0)
+            {
+                yield return normalized + ".png";
+            }
+
+            if (!normalized.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                && normalized.IndexOf("/", StringComparison.Ordinal) < 0)
+            {
+                yield return normalized + ".jpg";
             }
         }
 
