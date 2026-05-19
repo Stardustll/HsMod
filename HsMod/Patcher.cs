@@ -71,9 +71,17 @@ namespace HsMod
             {
                 Harmony harmony;
                 int harmonyCount;
-                harmony = Harmony.CreateAndPatchAll(loadType);
+                if (loadType == typeof(Patcher.PatchAntiCheat))
+                {
+                    harmony = new Harmony($"{PluginInfo.PLUGIN_GUID}.{loadType.FullName}");
+                    harmonyCount = Patcher.PatchAntiCheat.Apply(harmony);
+                }
+                else
+                {
+                    harmony = Harmony.CreateAndPatchAll(loadType);
+                    harmonyCount = harmony.GetPatchedMethods().Count();
+                }
                 //var harmony = new Harmony(PluginInfo.PLUGIN_GUID + ".Patcher");
-                harmonyCount = harmony.GetPatchedMethods().Count();
                 Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"{loadType.Name} => Patched {harmonyCount} methods");
                 AllHarmony.Add(harmony);
                 AllHarmonyName.Add(loadType.Name);
@@ -307,37 +315,98 @@ namespace HsMod
 
         public class PatchAntiCheat
         {
-            //禁用反作弊
-            [HarmonyPrefix]
-            [HarmonyPatch(typeof(AntiCheatSDK.AntiCheatManager), "OnLoginComplete")]
-            public static bool PatchAntiCheatManagerOnLoginComplete()
+            private static readonly object AntiCheatLogLock = new object();
+            private static readonly HashSet<string> AntiCheatLoggedFeatures = new HashSet<string>();
+
+            private static readonly string[] AntiCheatManagerNoopMethods =
             {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, "AntiCheat OnLoginComplete feature is disabled.");
+                "OnLoginComplete",
+                "TryCallSDK",
+                "CallInterfaceSetupSDK",
+                "CallInterfaceCallSDK",
+                "InnerSDKMethodCall",
+                "WriteUserInfo",
+                "ClearExtraParams",
+                "Shutdown"
+            };
+
+            private static readonly string[] AntiCheatTimerNoopMethods =
+            {
+                "CreateTimer",
+                "Start",
+                "UpdateInterval",
+                "OnTimedEvent"
+            };
+
+            public static int Apply(Harmony harmony)
+            {
+                var patchedCount = 0;
+                var initializePrefix = new HarmonyMethod(AccessTools.Method(typeof(PatchAntiCheat), nameof(PatchAntiCheatManagerInitialize)));
+                var noopPrefix = new HarmonyMethod(AccessTools.Method(typeof(PatchAntiCheat), nameof(PatchAntiCheatNoop)));
+
+                PatchMethodIfExists(harmony, typeof(AntiCheatSDK.AntiCheatManager), "Initialize", initializePrefix, ref patchedCount);
+
+                foreach (var methodName in AntiCheatManagerNoopMethods)
+                {
+                    PatchMethodIfExists(harmony, typeof(AntiCheatSDK.AntiCheatManager), methodName, noopPrefix, ref patchedCount);
+                }
+
+                var antiCheatTimerType = typeof(AntiCheatSDK.AntiCheatManager).Assembly.GetType("AntiCheatSDK.AntiCheatTimer")
+                    ?? AccessTools.TypeByName("AntiCheatSDK.AntiCheatTimer");
+                foreach (var methodName in AntiCheatTimerNoopMethods)
+                {
+                    PatchMethodIfExists(harmony, antiCheatTimerType, methodName, noopPrefix, ref patchedCount);
+                }
+
+                return patchedCount;
+            }
+
+            private static void PatchMethodIfExists(Harmony harmony, Type targetType, string methodName, HarmonyMethod prefix, ref int patchedCount)
+            {
+                if (targetType == null)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"AntiCheat patch target type missing for method: {methodName}");
+                    return;
+                }
+
+                var method = AccessTools.Method(targetType, methodName);
+                if (method == null)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"AntiCheat patch target missing: {targetType.FullName}.{methodName}");
+                    return;
+                }
+
+                harmony.Patch(method, prefix: prefix);
+                patchedCount++;
+            }
+
+            private static void LogAntiCheatDisabledOnce(string feature)
+            {
+                lock (AntiCheatLogLock)
+                {
+                    if (!AntiCheatLoggedFeatures.Add(feature))
+                    {
+                        return;
+                    }
+                }
+
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"AntiCheat {feature} feature is disabled.");
+            }
+
+            // 当前炉石类库 Initialize 只负责创建 AntiCheatTimer 并注册 LoginCompleted 事件。
+            private static bool PatchAntiCheatManagerInitialize(ref IEnumerator<Blizzard.T5.Jobs.IAsyncJobResult> __result)
+            {
+                LogAntiCheatDisabledOnce("AntiCheatManager.Initialize");
+                __result = Enumerable.Empty<Blizzard.T5.Jobs.IAsyncJobResult>().GetEnumerator();
                 return false;
             }
 
-            [HarmonyPrefix]
-            [HarmonyPatch(typeof(AntiCheatSDK.AntiCheatManager), "Shutdown")]
-            public static bool PatchAntiCheatManagerShutdown()
+            private static bool PatchAntiCheatNoop(MethodBase __originalMethod)
             {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, "AntiCheat Shutdown feature is disabled.");
-                return false;
-            }
-
-            [HarmonyPrefix]
-            [HarmonyPatch(typeof(AntiCheatSDK.AntiCheatManager), "TryCallSDK")]
-            [HarmonyPatch(typeof(AntiCheatSDK.AntiCheatManager), "CallInterfaceCallSDK")]
-            public static bool PatchAntiCheatManagerTryCallSDK(ref string scriptId)
-            {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, "AntiCheat TryCallSDK feature is disabled.");
-                return false;
-            }
-
-            [HarmonyPrefix]
-            [HarmonyPatch(typeof(AntiCheatSDK.AntiCheatManager), "InnerSDKMethodCall")]
-            public static bool PatchAntiCheatManagerInnerSDKMethodCall(ref Action<string> handler, ref string args)
-            {
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, "AntiCheat InnerSDKMethodCall feature is disabled.");
+                var feature = __originalMethod == null
+                    ? "Unknown"
+                    : $"{__originalMethod.DeclaringType?.Name}.{__originalMethod.Name}";
+                LogAntiCheatDisabledOnce(feature);
                 return false;
             }
         }
