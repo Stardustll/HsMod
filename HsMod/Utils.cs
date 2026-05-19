@@ -23,6 +23,15 @@ namespace HsMod
         private static int _zeroDollarShoppingSelectedIndex;
         private static bool _zeroDollarShoppingPanelModeActive;
         private static int _zeroDollarShoppingPanelGeneration;
+        private static bool _zeroDollarShoppingUiVisible;
+        private static Rect _zeroDollarShoppingUiRect = new Rect(120f, 90f, 920f, 620f);
+        private static int _zeroDollarShoppingUiLastScreenWidth;
+        private static int _zeroDollarShoppingUiLastScreenHeight;
+        private static Vector2 _zeroDollarShoppingListScroll;
+        private static Vector2 _zeroDollarShoppingDetailScroll;
+        private static string _zeroDollarShoppingFilter = string.Empty;
+        private static int _zeroDollarShoppingPageIndex;
+        private const int ZeroDollarShoppingUiPageSize = 12;
         private static readonly TimeSpan ZeroDollarShoppingPurchaseSuppressWindow = TimeSpan.FromSeconds(2);
         private static DateTime _zeroDollarShoppingSuppressOriginalPurchaseUntilUtc = DateTime.MinValue;
         private static long _zeroDollarShoppingLastHandledBundleId;
@@ -759,7 +768,7 @@ namespace HsMod
                 }
                 else
                 {
-                    OpenZeroDollarShoppingPanelInShop();
+                    ShowZeroDollarShoppingStandalonePanel();
                     return;
                 }
             }
@@ -1023,9 +1032,9 @@ namespace HsMod
             _zeroDollarShoppingCandidates.AddRange(candidates);
             RebuildZeroDollarShoppingCandidateMap();
             _zeroDollarShoppingSelectedIndex = 0;
-            UIStatus.Get().AddInfo($"发现 {_zeroDollarShoppingCandidates.Count} 个项目，正在打开零元购原生面板。", 8f);
+            UIStatus.Get().AddInfo($"发现 {_zeroDollarShoppingCandidates.Count} 个项目，正在打开零元购独立面板。", 8f);
             UIStatus.Get().AddInfo("再次按快捷键0可重开面板；按 Shift+0 可重新扫描。", 8f);
-            OpenZeroDollarShoppingPanelInShop();
+            ShowZeroDollarShoppingStandalonePanel();
         }
 
         private static bool TryAddZeroDollarCandidate(
@@ -1066,6 +1075,325 @@ namespace HsMod
             });
             Utils.MyLogger(LogLevel.Warning, $"ZeroDollar Candidate id={bundleId} title={normalizedTitle} currency={currencyType} source={normalizedSource}");
             return true;
+        }
+
+        private static void ShowZeroDollarShoppingStandalonePanel()
+        {
+            if (_zeroDollarShoppingCandidates.Count == 0)
+            {
+                UIStatus.Get().AddInfo("没有可展示的零元购候选项，请先扫描。");
+                return;
+            }
+
+            _zeroDollarShoppingSelectedIndex = Mathf.Clamp(_zeroDollarShoppingSelectedIndex, 0, _zeroDollarShoppingCandidates.Count - 1);
+            _zeroDollarShoppingPageIndex = Mathf.Clamp(_zeroDollarShoppingSelectedIndex / ZeroDollarShoppingUiPageSize, 0, GetZeroDollarShoppingMaxPageIndex(_zeroDollarShoppingCandidates.Count));
+            ApplyZeroDollarShoppingUiResolutionLayout(recenter: true);
+            _zeroDollarShoppingUiVisible = true;
+            _zeroDollarShoppingPanelModeActive = true;
+            _zeroDollarShoppingPanelGeneration++;
+            UIStatus.Get().AddInfo($"已打开零元购独立面板，共 {_zeroDollarShoppingCandidates.Count} 项。", 8f);
+        }
+
+        public static void DrawZeroDollarShoppingStandalonePanel()
+        {
+            if (!_zeroDollarShoppingUiVisible)
+            {
+                return;
+            }
+
+            ApplyZeroDollarShoppingUiResolutionLayout(recenter: false);
+            _zeroDollarShoppingUiRect = GUI.Window(0x5A4453, _zeroDollarShoppingUiRect, DrawZeroDollarShoppingWindow, "HsMod 零元购");
+            ClampZeroDollarShoppingUiToScreen();
+        }
+
+        private static void ApplyZeroDollarShoppingUiResolutionLayout(bool recenter)
+        {
+            var screenWidth = Mathf.Max(1, Screen.width);
+            var screenHeight = Mathf.Max(1, Screen.height);
+            var resolutionChanged = screenWidth != _zeroDollarShoppingUiLastScreenWidth
+                || screenHeight != _zeroDollarShoppingUiLastScreenHeight;
+
+            var targetWidth = GetZeroDollarShoppingUiTargetWidth(screenWidth);
+            var targetHeight = GetZeroDollarShoppingUiTargetHeight(screenHeight);
+            _zeroDollarShoppingUiRect.width = targetWidth;
+            _zeroDollarShoppingUiRect.height = targetHeight;
+
+            if (recenter || resolutionChanged)
+            {
+                _zeroDollarShoppingUiRect.x = Mathf.Max(0f, (screenWidth - targetWidth) * 0.5f);
+                _zeroDollarShoppingUiRect.y = Mathf.Max(0f, (screenHeight - targetHeight) * 0.5f);
+            }
+
+            _zeroDollarShoppingUiLastScreenWidth = screenWidth;
+            _zeroDollarShoppingUiLastScreenHeight = screenHeight;
+            ClampZeroDollarShoppingUiToScreen();
+        }
+
+        private static float GetZeroDollarShoppingUiTargetWidth(int screenWidth)
+        {
+            var maxWidth = Mathf.Max(320f, screenWidth - 24f);
+            var minWidth = Mathf.Min(720f, maxWidth);
+            return Mathf.Clamp(screenWidth * 0.82f, minWidth, maxWidth);
+        }
+
+        private static float GetZeroDollarShoppingUiTargetHeight(int screenHeight)
+        {
+            var maxHeight = Mathf.Max(300f, screenHeight - 24f);
+            var minHeight = Mathf.Min(460f, maxHeight);
+            return Mathf.Clamp(screenHeight * 0.82f, minHeight, maxHeight);
+        }
+
+        private static void ClampZeroDollarShoppingUiToScreen()
+        {
+            _zeroDollarShoppingUiRect.x = Mathf.Clamp(_zeroDollarShoppingUiRect.x, 0f, Mathf.Max(0f, Screen.width - _zeroDollarShoppingUiRect.width));
+            _zeroDollarShoppingUiRect.y = Mathf.Clamp(_zeroDollarShoppingUiRect.y, 0f, Mathf.Max(0f, Screen.height - _zeroDollarShoppingUiRect.height));
+        }
+
+        private static float GetZeroDollarShoppingListPaneWidth()
+        {
+            var minWidth = Mathf.Min(260f, Mathf.Max(160f, _zeroDollarShoppingUiRect.width - 360f));
+            var maxWidth = Mathf.Max(minWidth, Mathf.Min(480f, _zeroDollarShoppingUiRect.width * 0.55f));
+            return Mathf.Clamp(_zeroDollarShoppingUiRect.width * 0.42f, minWidth, maxWidth);
+        }
+
+        private static void DrawZeroDollarShoppingWindow(int windowId)
+        {
+            try
+            {
+                GUILayout.BeginVertical();
+                DrawZeroDollarShoppingToolbar();
+
+                if (_zeroDollarShoppingCandidates.Count == 0)
+                {
+                    GUILayout.Label("暂无候选项。点击“重新扫描”或关闭后按 Shift+0 重新扫描。", GUILayout.ExpandHeight(true));
+                }
+                else
+                {
+                    var visibleIndexes = GetZeroDollarShoppingVisibleIndexes();
+                    var maxPage = GetZeroDollarShoppingMaxPageIndex(visibleIndexes.Count);
+                    _zeroDollarShoppingPageIndex = Mathf.Clamp(_zeroDollarShoppingPageIndex, 0, maxPage);
+                    DrawZeroDollarShoppingPager(visibleIndexes.Count, maxPage);
+
+                    GUILayout.BeginHorizontal(GUILayout.ExpandHeight(true));
+                    DrawZeroDollarShoppingCandidateList(visibleIndexes);
+                    DrawZeroDollarShoppingCandidateDetail();
+                    GUILayout.EndHorizontal();
+                }
+
+                GUILayout.EndVertical();
+                GUI.DragWindow(new Rect(0f, 0f, 10000f, 24f));
+            }
+            catch (Exception ex)
+            {
+                MyLogger(LogLevel.Warning, ex);
+                GUILayout.Label("零元购面板绘制失败，请查看日志。");
+            }
+        }
+
+        private static void DrawZeroDollarShoppingToolbar()
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"候选：{_zeroDollarShoppingCandidates.Count}", GUILayout.Width(90f));
+            GUILayout.Label("过滤", GUILayout.Width(34f));
+            var newFilter = GUILayout.TextField(_zeroDollarShoppingFilter ?? string.Empty, GUILayout.MinWidth(180f));
+            if (!string.Equals(newFilter, _zeroDollarShoppingFilter, StringComparison.Ordinal))
+            {
+                _zeroDollarShoppingFilter = newFilter;
+                _zeroDollarShoppingPageIndex = 0;
+            }
+
+            if (GUILayout.Button("清除", GUILayout.Width(54f)))
+            {
+                _zeroDollarShoppingFilter = string.Empty;
+                _zeroDollarShoppingPageIndex = 0;
+            }
+            if (GUILayout.Button("重新扫描", GUILayout.Width(82f)))
+            {
+                CleanupZeroDollarShoppingPanelState(clearCandidates: true);
+                ZeroDollarShopping();
+                return;
+            }
+            if (GUILayout.Button("关闭", GUILayout.Width(64f)))
+            {
+                CleanupZeroDollarShoppingPanelState(clearCandidates: false);
+                return;
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        private static void DrawZeroDollarShoppingPager(int visibleCount, int maxPage)
+        {
+            GUILayout.BeginHorizontal();
+            GUI.enabled = _zeroDollarShoppingPageIndex > 0;
+            if (GUILayout.Button("上一页", GUILayout.Width(72f)))
+            {
+                _zeroDollarShoppingPageIndex--;
+            }
+            GUI.enabled = _zeroDollarShoppingPageIndex < maxPage;
+            if (GUILayout.Button("下一页", GUILayout.Width(72f)))
+            {
+                _zeroDollarShoppingPageIndex++;
+            }
+            GUI.enabled = true;
+            GUILayout.Label($"第 {_zeroDollarShoppingPageIndex + 1}/{maxPage + 1} 页，本页最多 {ZeroDollarShoppingUiPageSize} 项，过滤后 {visibleCount} 项");
+            GUILayout.EndHorizontal();
+        }
+
+        private static void DrawZeroDollarShoppingCandidateList(List<int> visibleIndexes)
+        {
+            GUILayout.BeginVertical(GUILayout.Width(GetZeroDollarShoppingListPaneWidth()));
+            GUILayout.Label("项目列表");
+            _zeroDollarShoppingListScroll = GUILayout.BeginScrollView(_zeroDollarShoppingListScroll, GUILayout.ExpandHeight(true));
+
+            var start = _zeroDollarShoppingPageIndex * ZeroDollarShoppingUiPageSize;
+            var end = Math.Min(start + ZeroDollarShoppingUiPageSize, visibleIndexes.Count);
+            for (var row = start; row < end; row++)
+            {
+                var candidateIndex = visibleIndexes[row];
+                var candidate = _zeroDollarShoppingCandidates[candidateIndex];
+                if (candidate == null)
+                {
+                    continue;
+                }
+
+                var oldColor = GUI.backgroundColor;
+                if (candidateIndex == _zeroDollarShoppingSelectedIndex)
+                {
+                    GUI.backgroundColor = new Color(0.35f, 0.65f, 1f, 1f);
+                }
+                var label = $"#{candidateIndex + 1} [{candidate.BundleId}] {TrimForZeroDollarUi(candidate.Title, 26)}";
+                if (GUILayout.Button(label, GUILayout.Height(28f)))
+                {
+                    _zeroDollarShoppingSelectedIndex = candidateIndex;
+                }
+                GUI.backgroundColor = oldColor;
+            }
+
+            GUILayout.EndScrollView();
+            GUILayout.EndVertical();
+        }
+
+        private static void DrawZeroDollarShoppingCandidateDetail()
+        {
+            GUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+            GUILayout.Label("详情");
+            _zeroDollarShoppingDetailScroll = GUILayout.BeginScrollView(_zeroDollarShoppingDetailScroll, GUILayout.ExpandHeight(true));
+
+            var candidate = GetSelectedZeroDollarShoppingCandidate();
+            if (candidate == null)
+            {
+                GUILayout.Label("未选择项目。", GUILayout.ExpandHeight(true));
+            }
+            else
+            {
+                GUILayout.Label($"标题：{candidate.Title}");
+                GUILayout.Label($"ID：{candidate.BundleId}");
+                GUILayout.Label($"货币：{candidate.CurrencyType}");
+                GUILayout.Label($"价格：{candidate.PriceText}");
+                GUILayout.Label($"来源：{candidate.Source}");
+                GUILayout.Space(8f);
+                GUILayout.Label("描述：");
+                GUILayout.TextArea(string.IsNullOrWhiteSpace(candidate.Description) ? "无描述" : candidate.Description, GUILayout.ExpandHeight(true));
+            }
+
+            GUILayout.EndScrollView();
+
+            GUILayout.BeginHorizontal();
+            GUI.enabled = candidate != null;
+            if (GUILayout.Button("购买选中项", GUILayout.Height(34f)))
+            {
+                PurchaseZeroDollarShoppingCandidate(candidate, "standalone-ui");
+            }
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
+            GUILayout.EndVertical();
+        }
+
+        private static List<int> GetZeroDollarShoppingVisibleIndexes()
+        {
+            var result = new List<int>();
+            var filter = string.IsNullOrWhiteSpace(_zeroDollarShoppingFilter) ? null : _zeroDollarShoppingFilter.Trim();
+            for (var i = 0; i < _zeroDollarShoppingCandidates.Count; i++)
+            {
+                var candidate = _zeroDollarShoppingCandidates[i];
+                if (candidate == null)
+                {
+                    continue;
+                }
+
+                if (filter == null || ZeroDollarShoppingCandidateMatchesFilter(candidate, filter))
+                {
+                    result.Add(i);
+                }
+            }
+            return result;
+        }
+
+        private static bool ZeroDollarShoppingCandidateMatchesFilter(ZeroDollarShoppingCandidate candidate, string filter)
+        {
+            return candidate.BundleId.ToString().IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0
+                || (candidate.Title ?? string.Empty).IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0
+                || (candidate.Description ?? string.Empty).IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0
+                || (candidate.Source ?? string.Empty).IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0
+                || candidate.CurrencyType.ToString().IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static int GetZeroDollarShoppingMaxPageIndex(int itemCount)
+        {
+            return Math.Max(0, (Math.Max(0, itemCount) + ZeroDollarShoppingUiPageSize - 1) / ZeroDollarShoppingUiPageSize - 1);
+        }
+
+        private static ZeroDollarShoppingCandidate GetSelectedZeroDollarShoppingCandidate()
+        {
+            if (_zeroDollarShoppingCandidates.Count == 0)
+            {
+                return null;
+            }
+
+            _zeroDollarShoppingSelectedIndex = Mathf.Clamp(_zeroDollarShoppingSelectedIndex, 0, _zeroDollarShoppingCandidates.Count - 1);
+            return _zeroDollarShoppingCandidates[_zeroDollarShoppingSelectedIndex];
+        }
+
+        private static string TrimForZeroDollarUi(string value, int maxChars)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "(Unnamed Bundle)";
+            }
+            value = value.Trim().Replace('\n', ' ').Replace('\r', ' ');
+            return value.Length <= maxChars ? value : value.Substring(0, Math.Max(0, maxChars - 1)) + "…";
+        }
+
+        private static void PurchaseZeroDollarShoppingCandidate(ZeroDollarShoppingCandidate candidate, string resolvedSource)
+        {
+            if (candidate == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (candidate.PurchaseAction == null)
+                {
+                    UIStatus.Get().AddInfo($"候选项缺少购买动作：{candidate.Title}（id={candidate.BundleId}）");
+                    return;
+                }
+
+                var now = DateTime.UtcNow;
+                _zeroDollarShoppingLastHandledBundleId = candidate.BundleId;
+                _zeroDollarShoppingLastHandledTitle = candidate.Title;
+                _zeroDollarShoppingSuppressOriginalPurchaseUntilUtc = now.Add(ZeroDollarShoppingPurchaseSuppressWindow);
+                MyLogger(LogLevel.Info, $"ZeroDollar StandaloneUI selected id={candidate.BundleId} title={candidate.Title} currency={candidate.CurrencyType} source={candidate.Source} resolve={resolvedSource}");
+                CleanupZeroDollarShoppingPanelState(clearCandidates: false);
+                candidate.PurchaseAction.Invoke();
+                UIStatus.Get().AddInfo($"已尝试购买：{candidate.Title}（id={candidate.BundleId}）", 10f);
+                UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60f);
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(LogLevel.Warning, ex);
+                UIStatus.Get().AddInfo("购买触发失败，请查看日志。");
+            }
         }
 
         private static void OpenZeroDollarShoppingPanelInShop()
@@ -1432,12 +1760,15 @@ namespace HsMod
         private static void CleanupZeroDollarShoppingPanelState(bool clearCandidates)
         {
             _zeroDollarShoppingPanelModeActive = false;
+            _zeroDollarShoppingUiVisible = false;
 
             if (clearCandidates)
             {
                 _zeroDollarShoppingCandidates.Clear();
                 _zeroDollarShoppingCandidateMap.Clear();
                 _zeroDollarShoppingSelectedIndex = 0;
+                _zeroDollarShoppingPageIndex = 0;
+                _zeroDollarShoppingFilter = string.Empty;
             }
         }
 
@@ -1613,14 +1944,7 @@ namespace HsMod
                 }
                 else
                 {
-                    _zeroDollarShoppingLastHandledBundleId = candidate.BundleId;
-                    _zeroDollarShoppingLastHandledTitle = candidate.Title;
-                    _zeroDollarShoppingSuppressOriginalPurchaseUntilUtc = now.Add(ZeroDollarShoppingPurchaseSuppressWindow);
-                    MyLogger(LogLevel.Info, $"ZeroDollar PurchasePanel selected id={candidate.BundleId} title={candidate.Title} currency={candidate.CurrencyType} source={candidate.Source} resolve={resolvedSource}");
-                    CleanupZeroDollarShoppingPanelState(clearCandidates: false);
-                    candidate.PurchaseAction.Invoke();
-                    UIStatus.Get().AddInfo($"已尝试购买：{candidate.Title}（id={candidate.BundleId}）", 10f);
-                    UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60f);
+                    PurchaseZeroDollarShoppingCandidate(candidate, resolvedSource);
                 }
             }
             catch (Exception ex)

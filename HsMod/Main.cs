@@ -21,6 +21,8 @@ namespace HsMod
                 {
                     GUILayout.Width(200f)
                 });
+
+            Utils.DrawZeroDollarShoppingStandalonePanel();
         }
         private void Awake()
         {
