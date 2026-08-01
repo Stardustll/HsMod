@@ -67,7 +67,8 @@ namespace HsMod
         {
             var request = context.Request;
             context.Response.StatusCode = 200;
-            string rawUrLower = request.RawUrl.ToLower();
+            //注意：RawUrl 含 query string，会导致 /api/skins?type=x 无法命中路由，必须用 AbsolutePath
+            string rawUrLower = request.Url.AbsolutePath.ToLower();
 
             Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"{request.RemoteEndPoint.ToString()} => {request.RawUrl}");
             Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"{DateTime.Now.ToString("yyyy/MM/dd_HH:mm:ss")} {request.Url}");
@@ -256,6 +257,55 @@ namespace HsMod
                 using (var writer = new StreamWriter(context.Response.OutputStream))
                 {
                     await writer.WriteLineAsync(output);
+                }
+            }
+            else if (rawUrLower == "/api/skins" && request.HttpMethod == "GET")
+            {
+                //皮肤列表 JSON：?type=hero（缺省返回全部组）
+                context.Response.ContentType = "application/json; charset=UTF-8";
+                string type = request.QueryString["type"];
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteLineAsync(WebApi.GetSkinListJson(type));
+                }
+            }
+            else if (rawUrLower == "/api/skins" && request.HttpMethod == "POST")
+            {
+                //皮肤操作：保存/删除映射 或 直接设置
+                context.Response.ContentType = "application/json; charset=UTF-8";
+                string body = string.Empty;
+                using (var reader = new StreamReader(request.InputStream))
+                {
+                    body = await reader.ReadToEndAsync();
+                }
+                int status = WebApi.HandleSkinAction(body, out string msg);
+                context.Response.StatusCode = status;
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteLineAsync($"{{\"status\":{status},\"output\":\"{msg}\"}}");
+                }
+            }
+            else if (rawUrLower == "/skinimage" && request.HttpMethod == "GET")
+            {
+                //皮肤缩略图：?type=hero&id=123（首次请求会等待主线程异步加载完成）
+                string type = request.QueryString["type"];
+                string idStr = request.QueryString["id"];
+                if (string.IsNullOrEmpty(type) || !int.TryParse(idStr, out int id) || id <= 0)
+                {
+                    context.Response.StatusCode = 400;
+                }
+                else
+                {
+                    byte[] image = SkinImages.GetImage(type, id);
+                    if (image != null)
+                    {
+                        context.Response.ContentType = "image/png";
+                        await context.Response.OutputStream.WriteAsync(image, 0, image.Length);
+                    }
+                    else
+                    {
+                        context.Response.StatusCode = 404;    //无图（或加载失败），前端显示占位
+                    }
                 }
             }
             else

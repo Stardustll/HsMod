@@ -16,6 +16,7 @@ namespace HsMod
             public int Id;
             public string Name;
             public int ClassId = -1;    //英雄职业（TAG_CLASS），非英雄类为 -1
+            public int PetId = -1;    //宠物类型（仅 Pet 有效）
         }
 
         public enum SkinType
@@ -31,7 +32,14 @@ namespace HsMod
             Pet          //宠物 → skinPet
         }
 
-        private static readonly Dictionary<SkinType, List<SkinItem>> s_cache = new Dictionary<SkinType, List<SkinItem>>();
+        private class SkinListCache
+        {
+            public List<SkinItem> Items;
+            public DateTime Time;
+        }
+
+        private static readonly Dictionary<SkinType, SkinListCache> s_cache = new Dictionary<SkinType, SkinListCache>();
+        private const double EmptyRetrySeconds = 10;    //空结果短缓存：DBF 未加载完时短暂返回空，随后自动重试
 
         //英雄映射表：原始皮肤ID → 目标皮肤ID列表（HsSkins.cfg）
         public static readonly Dictionary<int, List<int>> Mapping = new Dictionary<int, List<int>>();
@@ -122,8 +130,16 @@ namespace HsMod
 
         public static List<SkinItem> GetList(SkinType type)
         {
-            if (s_cache.TryGetValue(type, out List<SkinItem> cached))
-                return cached;
+            lock (s_cache)
+            {
+                if (s_cache.TryGetValue(type, out SkinListCache cached))
+                {
+                    if (cached.Items.Count > 0 || (DateTime.UtcNow - cached.Time).TotalSeconds < EmptyRetrySeconds)
+                        return cached.Items;
+                    s_cache.Remove(type);    //空结果过期，重新加载
+                }
+            }
+
             List<SkinItem> list = new List<SkinItem>();
             try
             {
@@ -160,7 +176,7 @@ namespace HsMod
                         break;
                     case SkinType.Pet:
                         foreach (var r in GameDbf.PetVariant.GetRecords().OrderBy(x => x.ID))
-                            if (r != null) list.Add(new SkinItem { Id = r.ID, Name = r.Name.GetString() });
+                            if (r != null) list.Add(new SkinItem { Id = r.ID, Name = r.Name.GetString(), PetId = r.PetId });
                         break;
                 }
             }
@@ -168,7 +184,10 @@ namespace HsMod
             {
                 Utils.MyLogger(BepInEx.Logging.LogLevel.Error, $"SkinPanel.GetList({type}): {ex.Message} \n{ex.StackTrace}");
             }
-            s_cache[type] = list;
+            lock (s_cache)
+            {
+                s_cache[type] = new SkinListCache { Items = list, Time = DateTime.UtcNow };
+            }
             return list;
         }
 
@@ -243,6 +262,24 @@ namespace HsMod
                 Mapping.Remove(sourceId);
             else
                 Mapping[sourceId] = new List<int>(targets);
+        }
+
+        //网页类型名 → SkinType（与 /api/skins 接口约定一致）
+        public static SkinType? ParseType(string type)
+        {
+            switch (type)
+            {
+                case "cardBack": return SkinType.CardBack;
+                case "coin": return SkinType.Coin;
+                case "board": return SkinType.Board;
+                case "bgsBoard": return SkinType.BgsBoard;
+                case "bgsFinisher": return SkinType.Finisher;
+                case "hero": return SkinType.Hero;
+                case "bgsHero": return SkinType.BgsHero;
+                case "bob": return SkinType.Bob;
+                case "pet": return SkinType.Pet;
+                default: return null;
+            }
         }
 
         //非英雄类：直接设置的当前值

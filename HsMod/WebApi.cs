@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 using static HsMod.PluginConfig;
@@ -283,6 +284,141 @@ namespace HsMod
             if (type == typeof(KeyboardShortcut)) return "keyboard";
             if (type.IsEnum) return "enum";
             return "string";
+        }
+
+        //GET /api/skins：皮肤列表 JSON（type 缺省返回全部组）
+        //SkinPanel.GetList 内部访问 GameDbf/DefLoader 等 Unity 数据，必须在主线程执行
+        public static string GetSkinListJson(string type = null)
+        {
+            string result = null;
+            Exception error = null;
+            using (ManualResetEventSlim evt = new ManualResetEventSlim(false))
+            {
+                ModSettingsUI.RunOnMainThread(() =>
+                {
+                    try { result = BuildSkinListJson(type); }
+                    catch (Exception ex) { error = ex; }
+                    finally { evt.Set(); }
+                });
+                if (!evt.Wait(10000))
+                {
+                    return Newtonsoft.Json.JsonConvert.SerializeObject(new Dictionary<string, object> { ["success"] = false, ["error"] = "timeout" });
+                }
+            }
+            if (error != null)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Error, $"WebApi.GetSkinListJson: {error.Message} \n{error.StackTrace}");
+                return Newtonsoft.Json.JsonConvert.SerializeObject(new Dictionary<string, object> { ["success"] = false, ["error"] = error.Message });
+            }
+            return result;
+        }
+
+        //实际数据构建：经主线程调度后执行（BuildSkinListJson 只跑在主线程）
+        private static string BuildSkinListJson(string type)
+        {
+            Dictionary<string, List<Dictionary<string, object>>> groups = new Dictionary<string, List<Dictionary<string, object>>>();
+            string[] allTypes = { "cardBack", "coin", "board", "bgsBoard", "bgsFinisher", "hero", "bgsHero", "bob", "pet" };
+            string[] wanted = string.IsNullOrEmpty(type) ? allTypes : new[] { type };
+            foreach (string t in wanted)
+            {
+                SkinPanel.SkinType? st = SkinPanel.ParseType(t);
+                if (st == null) continue;
+                List<Dictionary<string, object>> items = new List<Dictionary<string, object>>();
+                bool heroMapping = st.Value == SkinPanel.SkinType.Hero || st.Value == SkinPanel.SkinType.BgsHero;
+                foreach (SkinPanel.SkinItem item in SkinPanel.GetList(st.Value))
+                {
+                    Dictionary<string, object> d = new Dictionary<string, object>
+                    {
+                        ["id"] = item.Id,
+                        ["name"] = item.Name
+                    };
+                    if (item.ClassId >= 0) d["heroClass"] = SkinPanel.GetClassName(item.ClassId);
+                    if (item.PetId >= 0) d["petId"] = item.PetId;
+                    if (heroMapping && SkinPanel.HasMapping(item.Id))
+                        d["mapping"] = SkinPanel.GetMappingTargets(item.Id);    //已映射的目标列表
+                    items.Add(d);
+                }
+                groups[t] = items;
+            }
+            return Newtonsoft.Json.JsonConvert.SerializeObject(new Dictionary<string, object>
+            {
+                ["success"] = true,
+                ["groups"] = groups,
+                ["configNames"] = new Dictionary<string, string>()
+            });
+        }
+
+        //POST /api/skins：映射保存/删除 或 直接设置皮肤
+        //body: {action:"save"|"delete"|"set", type, src, targets?[], id?}
+        public static int HandleSkinAction(string body, out string res)
+        {
+            res = string.Empty;
+            try
+            {
+                var json = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(body);
+                if (json == null || !json.TryGetValue("action", out object actionObj))
+                {
+                    res = "invalid request";
+                    return 400;
+                }
+                string action = actionObj.ToString();
+                string type = json.TryGetValue("type", out object typeObj) ? typeObj.ToString() : "";
+                SkinPanel.SkinType? st = SkinPanel.ParseType(type);
+                if (st == null)
+                {
+                    res = "unknown skin type";
+                    return 400;
+                }
+                if (action == "save" || action == "delete")
+                {
+                    if (!json.TryGetValue("src", out object srcObj) || !int.TryParse(srcObj.ToString(), out int src) || src <= 0)
+                    {
+                        res = "invalid src";
+                        return 400;
+                    }
+                    List<int> targets = new List<int>();
+                    if (action == "save")
+                    {
+                        if (json.TryGetValue("targets", out object targetsObj) && targetsObj is Newtonsoft.Json.Linq.JArray arr)
+                        {
+                            foreach (var token in arr)
+                                if (int.TryParse(token.ToString(), out int tid) && tid > 0) targets.Add(tid);
+                        }
+                        if (targets.Count == 0)
+                        {
+                            res = "no targets";
+                            return 400;
+                        }
+                        SkinPanel.SetMapping(src, targets);
+                    }
+                    else
+                    {
+                        SkinPanel.SetMapping(src, null);
+                    }
+                    SkinPanel.SaveMapping();
+                    res = action == "save" ? "saved" : "deleted";
+                    return 200;
+                }
+                if (action == "set")
+                {
+                    if (!json.TryGetValue("id", out object idObj) || !int.TryParse(idObj.ToString(), out int id))
+                    {
+                        res = "invalid id";
+                        return 400;
+                    }
+                    SkinPanel.SetValue(st.Value, id > 0 ? id : -1);    //id<=0 表示取消设置
+                    res = "set";
+                    return 200;
+                }
+                res = "unknown action";
+                return 400;
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Error, $"WebApi.HandleSkinAction: {ex.Message} \n{ex.StackTrace}");
+                res = ex.Message;
+                return 500;
+            }
         }
 
     }

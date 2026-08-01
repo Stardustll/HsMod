@@ -1002,7 +1002,27 @@ namespace HsMod
                 .Replace("{config.page.warning}", LocalizationManager.GetLangValue("config.page.warning"))
                 .Replace("{config.page.warning.desc}", LocalizationManager.GetLangValue("config.page.warning.desc"))
                 .Replace("{config.page.cancel}", LocalizationManager.GetLangValue("config.page.cancel"))
-                .Replace("{config.page.confirm}", LocalizationManager.GetLangValue("config.page.confirm"));
+                .Replace("{config.page.confirm}", LocalizationManager.GetLangValue("config.page.confirm"))
+                .Replace("{skin.tab}", LocalizationManager.GetLangValue("skin.tab"))
+                .Replace("{skinCardBack.name}", LocalizationManager.GetLangValue("skinCardBack.name"))
+                .Replace("{skinCoin.name}", LocalizationManager.GetLangValue("skinCoin.name"))
+                .Replace("{skinBoard.name}", LocalizationManager.GetLangValue("skinBoard.name"))
+                .Replace("{skinBgsBoard.name}", LocalizationManager.GetLangValue("skinBgsBoard.name"))
+                .Replace("{skinBgsFinisher.name}", LocalizationManager.GetLangValue("skinBgsFinisher.name"))
+                .Replace("{skinHero.name}", LocalizationManager.GetLangValue("skinHero.name"))
+                .Replace("{skin.bgsHero}", LocalizationManager.GetLangValue("skin.bgsHero"))
+                .Replace("{skinBob.name}", LocalizationManager.GetLangValue("skinBob.name"))
+                .Replace("{skinPet.name}", LocalizationManager.GetLangValue("skinPet.name"))
+                .Replace("{skin.current}", LocalizationManager.GetLangValue("skin.current"))
+                .Replace("{skin.empty}", LocalizationManager.GetLangValue("skin.empty"))
+                .Replace("{skin.loading}", LocalizationManager.GetLangValue("skin.loading"))
+                .Replace("{skin.noImage}", LocalizationManager.GetLangValue("skin.noImage"))
+                .Replace("{skin.all}", LocalizationManager.GetLangValue("skin.all"))
+                .Replace("{skin.saveMapping}", LocalizationManager.GetLangValue("skin.saveMapping"))
+                .Replace("{skin.deleteMapping}", LocalizationManager.GetLangValue("skin.deleteMapping"))
+                .Replace("{skin.mapTip}", LocalizationManager.GetLangValue("skin.mapTip"))
+                .Replace("{skin.saved}", LocalizationManager.GetLangValue("skin.saved"))
+                .Replace("{skin.deleted}", LocalizationManager.GetLangValue("skin.deleted"));
 
             builder.AppendLine(configHtml);
             return Template(builder, "Config");

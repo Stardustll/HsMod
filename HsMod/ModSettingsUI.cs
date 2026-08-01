@@ -1,5 +1,6 @@
 using BepInEx.Configuration;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -79,6 +80,30 @@ namespace HsMod
         }
 
         public static bool IsVisible => Instance != null && Instance.visible;
+
+        //主线程调度：WebServer 后台线程不能直接调 Unity API，通过此队列转发到 Update 执行
+        private static readonly ConcurrentQueue<Action> s_mainThreadActions = new ConcurrentQueue<Action>();
+
+        public static void RunOnMainThread(Action action)
+        {
+            if (action == null) return;
+            s_mainThreadActions.Enqueue(action);
+        }
+
+        private void Update()
+        {
+            while (s_mainThreadActions.TryDequeue(out Action action))
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Error, $"ModSettingsUI.RunOnMainThread: {ex.Message} \n{ex.StackTrace}");
+                }
+            }
+        }
 
         public static void Toggle()
         {
