@@ -164,7 +164,7 @@ const skinLang = {
 };
 const skinTypes = ['cardBack', 'coin', 'board', 'bgsBoard', 'bgsFinisher', 'hero', 'bgsHero', 'bob', 'pet'];
 const heroMappingTypes = ['hero', 'bgsHero'];
-const skinImageTypes = ['hero', 'bgsHero', 'bob', 'coin', 'pet', 'cardBack', 'bgsBoard'];    // 后端可出图的类型
+const skinImageTypes = ['hero', 'bgsHero', 'bob', 'coin', 'cardBack', 'bgsBoard'];    // 后端可出图的类型（pet 无卡牌图）
 
 let skinState = {
     type: 'hero', items: [], curVal: -1, heroClass: '',
@@ -248,6 +248,7 @@ function renderSkinGrid() {
     }
     let html = '';
     st.items.forEach(function (item) {
+        const hasImage = skinImageTypes.indexOf(st.type) >= 0;
         let cls = '';
         if (isHeroMappingType(st.type)) {
             if (String(item.id) === String(st.source)) cls = ' mapping-source';
@@ -256,9 +257,10 @@ function renderSkinGrid() {
         } else {
             if (String(item.id) === String(st.curVal)) cls = ' selected';
         }
-        const hasImage = skinImageTypes.indexOf(st.type) >= 0;
+        if (hasImage) cls += ' has-image';    //.skin-thumb 默认 display:none，无此 class 图片永不显示
         const thumb = hasImage
-            ? '<img class="skin-thumb" src="' + escapeHtml(skinImageUrl(st.type, item.id)) + '" loading="lazy" decoding="async" alt="" ' +
+            //loading="lazy" 对动态插入的图片在滚动容器内不触发加载，改用 IntersectionObserver（data-src）
+            ? '<img class="skin-thumb" data-src="' + escapeHtml(skinImageUrl(st.type, item.id)) + '" alt="" ' +
               'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">' +
               '<div class="skin-thumb-fallback" style="display:none;">' + escapeHtml(skinLang.noImage) + '</div>'
             : '';
@@ -277,6 +279,28 @@ function renderSkinGrid() {
             '</div></div>';
     });
     grid.html(html);
+    setupSkinLazyImages();
+}
+
+// 图片懒加载：进入视口（提前300px）才设置 src 发起请求
+let skinLazyObserver = null;
+function setupSkinLazyImages() {
+    if (skinLazyObserver) { skinLazyObserver.disconnect(); skinLazyObserver = null; }
+    const imgs = document.querySelectorAll('#skin-grid img[data-src]');
+    if (!imgs.length) return;
+    if (!('IntersectionObserver' in window)) {
+        imgs.forEach(i => { i.src = i.dataset.src; });
+        return;
+    }
+    skinLazyObserver = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+            if (!e.isIntersecting) return;
+            const img = e.target;
+            if (!img.src) img.src = img.dataset.src;
+            skinLazyObserver.unobserve(img);
+        });
+    }, { rootMargin: '300px 0px' });
+    imgs.forEach(i => skinLazyObserver.observe(i));
 }
 
 // 皮肤卡片点击（事件委托）
@@ -373,7 +397,7 @@ $('#skin-class-tabs').on('click', '.skin-class-btn', function () {
 
 function loadSkinTab(type, force) {
     const st = skinState;
-    if (!force && st.type === type && st.allItems) return;
+    if (!force && st.type === type && st.allItems) { setupSkinLazyImages(); return; }
     resetSkinSelection();
     st.type = type;
     st.allItems = null;
@@ -604,6 +628,7 @@ $('#tab-skin').on('click', function () {
     $('#config-view').addClass('hidden');
     $('#skin-view').removeClass('hidden');
     initSkinPanel();
+    setupSkinLazyImages();    //容器刚显示，重新观察触发图片加载
 });
 
 document.addEventListener('DOMContentLoaded', function() {

@@ -27,7 +27,8 @@ namespace HsMod
         private const int FailRetrySeconds = 300;    //失败条目 5 分钟后允许重试
 
         //磁盘缓存：图片获取成功后落盘，后续请求先读本地文件，避免重复从游戏加载
-        private static string CacheDir => Path.Combine(BepInEx.Paths.ConfigPath, "skinCache");
+        //目录带版本号：PNG 编码变更（行序修复）后旧缓存自动作废
+        private static string CacheDir => Path.Combine(BepInEx.Paths.ConfigPath, "skinCache2");
         private static string CachePath(string key) => Path.Combine(CacheDir, key + ".png");
 
         public static byte[] GetImage(string type, int id)
@@ -70,11 +71,12 @@ namespace HsMod
             return null;
         }
 
+        //主线程内发起加载：回调式 API（LoadCardDef/LoadCardBackByIndex）不能同步等待——
+        //回调同样发生在主线程，等待会造成死锁。改为回调中完成编码并写缓存，请求线程轮询缓存取回
         private static void LoadImageAsync(string key, string type, int id)
         {
             try
             {
-                byte[] bytes = null;
                 switch (type)
                 {
                     case "hero":
@@ -82,31 +84,36 @@ namespace HsMod
                     case "bob":
                     case "coin":
                     case "pet":
-                        bytes = LoadCardImage(id);
+                        StartLoadCardImage(key, id);
                         break;
                     case "cardBack":
-                        bytes = LoadCardBackImage(id);
+                        StartLoadCardBackImage(key, id);
                         break;
                     case "bgsBoard":
-                        bytes = LoadBoardImage(id);
+                        CompleteLoad(key, LoadBoardImage(id));    //同步加载，无回调
                         break;
                 }
-                lock (s_lock)
-                {
-                    if (s_cache.Count >= CacheMax) s_cache.Clear();
-                    s_cache[key] = new CacheEntry { Bytes = bytes, FetchedAt = DateTime.UtcNow };
-                }
-                if (bytes != null) WriteDiskCache(key, bytes);    //成功后落盘
             }
             catch (Exception ex)
             {
                 Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"SkinImages.LoadImageAsync({key}): {ex.Message}");
-                lock (s_lock)
-                {
-                    if (s_cache.Count >= CacheMax) s_cache.Clear();
-                    s_cache[key] = new CacheEntry { Bytes = null, FetchedAt = DateTime.UtcNow };
-                }
+                CompleteLoad(key, null);
             }
+        }
+
+        //回调/同步加载完成后统一写缓存并落盘
+        private static void CompleteLoad(string key, byte[] bytes)
+        {
+            if (bytes != null)
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"SkinImages ok {key} {bytes.Length}B");
+            else
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"SkinImages fail {key}");
+            lock (s_lock)
+            {
+                if (s_cache.Count >= CacheMax) s_cache.Clear();
+                s_cache[key] = new CacheEntry { Bytes = bytes, FetchedAt = DateTime.UtcNow };
+            }
+            if (bytes != null) WriteDiskCache(key, bytes);    //成功后落盘
         }
 
         private static byte[] ReadDiskCache(string key)
@@ -138,44 +145,63 @@ namespace HsMod
         }
 
         //卡牌肖像（对战英雄/酒馆英雄/鲍勃/幸运币/宠物均以卡牌形式存在）
-        private static byte[] LoadCardImage(int cardId)
+        private static void StartLoadCardImage(string key, int cardId)
         {
             string cardStringId = DefLoader.Get()?.GetEntityDef(cardId)?.GetCardId();
-            if (string.IsNullOrEmpty(cardStringId)) return null;
-            DefLoader.DisposableCardDef cardDef = null;
-            ManualResetEventSlim evt = new ManualResetEventSlim(false);
+            if (string.IsNullOrEmpty(cardStringId))
+            {
+                CompleteLoad(key, null);
+                return;
+            }
             DefLoader.Get().LoadCardDef(cardStringId, (string loadedCardId, DefLoader.DisposableCardDef def, object userData) =>
             {
-                cardDef = def;
-                evt.Set();
+                try
+                {
+                    if (def?.CardDef == null)
+                    {
+                        CompleteLoad(key, null);
+                        return;
+                    }
+                    try
+                    {
+                        string path = def.CardDef.PortraitTexturePath;
+                        if (string.IsNullOrEmpty(path))
+                        {
+                            CompleteLoad(key, null);
+                            return;
+                        }
+                        Texture2D tex = AssetLoader.Get()?.LoadAsset<Texture2D>(AssetReference.CreateFromAssetString(path), AssetLoadingOptions.None);
+                        CompleteLoad(key, EncodePng(tex));
+                    }
+                    finally
+                    {
+                        def.Dispose();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"SkinImages.StartLoadCardImage({key}): {ex.Message}");
+                    CompleteLoad(key, null);
+                }
             }, null, CardPortraitQuality.GetDefault());
-            if (!evt.Wait(10000)) return null;
-            if (cardDef?.CardDef == null) return null;
-            try
-            {
-                string path = cardDef.CardDef.PortraitTexturePath;
-                if (string.IsNullOrEmpty(path)) return null;
-                Texture2D tex = AssetLoader.Get()?.LoadAsset<Texture2D>(AssetReference.CreateFromAssetString(path), AssetLoadingOptions.None);
-                return EncodePng(tex);
-            }
-            finally
-            {
-                cardDef.Dispose();
-            }
         }
 
         //卡背：通过 CardBackManager 加载，取 m_CardBackTexture
-        private static byte[] LoadCardBackImage(int cardBackId)
+        private static void StartLoadCardBackImage(string key, int cardBackId)
         {
-            CardBack cardBack = null;
-            ManualResetEventSlim evt = new ManualResetEventSlim(false);
             bool ok = CardBackManager.Get()?.LoadCardBackByIndex(cardBackId, (CardBackManager.LoadCardBackData data) =>
             {
-                cardBack = data?.m_CardBack;
-                evt.Set();
+                try
+                {
+                    CompleteLoad(key, EncodePng(data?.m_CardBack?.m_CardBackTexture));
+                }
+                catch (Exception ex)
+                {
+                    Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"SkinImages.StartLoadCardBackImage({key}): {ex.Message}");
+                    CompleteLoad(key, null);
+                }
             }) ?? false;
-            if (!ok || !evt.Wait(10000)) return null;
-            return EncodePng(cardBack?.m_CardBackTexture);
+            if (!ok) CompleteLoad(key, null);
         }
 
         //酒馆面板：直接加载 DetailsTexture 资源
@@ -194,9 +220,36 @@ namespace HsMod
             if (tex == null) return null;
             try
             {
-                Color32[] pixels = tex.GetPixels32();
+                Color32[] pixels;
                 int w = tex.width;
                 int h = tex.height;
+                if (tex.isReadable)
+                {
+                    pixels = tex.GetPixels32();
+                }
+                else
+                {
+                    //游戏资源纹理默认 GPU 专用（不可读）：Blit 到 RenderTexture 再 ReadPixels
+                    RenderTexture rt = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32);
+                    Texture2D readable = null;
+                    RenderTexture prev = RenderTexture.active;
+                    try
+                    {
+                        rt.Create();
+                        Graphics.Blit(tex, rt, Vector2.one, Vector2.zero);    //裁剪版无两参 Blit，用 scale/offset 全屏绘制
+                        RenderTexture.active = rt;
+                        readable = new Texture2D(w, h, TextureFormat.RGBA32, false);
+                        readable.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+                        readable.Apply();
+                        pixels = readable.GetPixels32();
+                    }
+                    finally
+                    {
+                        RenderTexture.active = prev;    //异常时也必须恢复，否则影响游戏渲染
+                        rt.Release();
+                        if (readable != null) UnityEngine.Object.Destroy(readable);
+                    }
+                }
                 if (w > MaxWidth)
                 {
                     int nw = MaxWidth;
@@ -254,7 +307,8 @@ namespace HsMod
             for (int y = 0; y < h; y++)
             {
                 raw[idx++] = 0;    //filter: None
-                int baseIdx = y * w;
+                //GetPixels32 数组从下到上排列，PNG 要求从上到下，反转行序
+                int baseIdx = (h - 1 - y) * w;
                 for (int x = 0; x < w; x++)
                 {
                     Color32 c = pixels[baseIdx + x];
