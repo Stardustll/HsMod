@@ -15,13 +15,14 @@ namespace HsMod
         {
             string btn = @" <a href=""/info""><button class=""btn_li"">主要信息</button><br/></a><br />";
             btn += @"<a href=""/pack""><button class=""btn_li"">卡包信息</button><br/></a><br />";
-            btn += @"<a href=""/collection""><button class=""btn_li"">卡牌收藏</button><br/></a><br />";
-            btn += @"<a href=""/skins""><button class=""btn_li"">皮肤信息</button><br/></a><br />";
-            btn += @"<a href=""/lettuce""><button class=""btn_li"">佣兵关卡</button><br/></a><br />";
-            btn += @"<a href=""/mercenaries""><button class=""btn_li"">佣兵收藏</button><br/></a><br />";
-            if (System.IO.File.Exists(CommandConfig.hsMatchLogPath)) btn += @"<a href=""/matchlog""><button class=""btn_li"">炉石对局</button><br/></a><br />";
-            if (File.Exists(Path.Combine(PluginConfig.HsModWebSite, "config", "index.html"))) btn += @"<a href=""/config/index.html""><button class=""btn_li"">配置修改</button><br/></a><br />";
-            btn += @"<a href=""/about""><button class=""btn_li"">关&emsp;&emsp;于</button><br/></a><br />";
+            btn += @"<a href=""/collection""><button class=""btn_li"">卡牌收藏</button><br /></a><br />";
+            btn += @"<a href=""/skins""><button class=""btn_li"">皮肤信息</button><br /></a><br />";
+            btn += @"<a href=""/lettuce""><button class=""btn_li"">佣兵关卡</button><br /></a><br />";
+            btn += @"<a href=""/mercenaries""><button class=""btn_li"">佣兵收藏</button><br /></a><br />";
+            if (System.IO.File.Exists(CommandConfig.hsMatchLogPath)) btn += @"<a href=""/matchlog""><button class=""btn_li"">炉石对局</button><br /></a><br />";
+            string configUrl = File.Exists(Path.Combine(PluginConfig.HsModWebSite, "config", "index.html")) ? "/config/index.html" : "/config";
+            btn += $@"<a href=""{configUrl}""><button class=""btn_li"">{LocalizationManager.GetLangValue("config.page.button")}</button><br /></a><br />";
+            btn += @"<a href=""/about""><button class=""btn_li"">关&emsp;&emsp;于</button><br /></a><br />";
             return btn;
         }
 
@@ -87,7 +88,6 @@ namespace HsMod
             body += $@"<div style=""text-align: center; width: auto; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);"">{btn}</div>";
             return Template("index", body);
         }
-
 
 
         public static StringBuilder AboutPage()
@@ -580,7 +580,6 @@ namespace HsMod
             {
                 string temp = @"<table border=0 style=""text-align: center;""><tr>";
                 temp += "<th>索引</th>";
-                temp += "<th>卡牌ID</th>";
                 temp += "<th>名称</th>";
                 temp += "</tr>";
 
@@ -590,9 +589,6 @@ namespace HsMod
                     {
                         temp += "<tr>";
                         temp += $"<td>{record.CardId}</td>";
-                        string coinStringId = "";
-                        try { coinStringId = GameUtils.TranslateDbIdToCardId(record.CardId); } catch { }
-                        temp += $"<td>{coinStringId}</td>";
                         temp += $"<td>{record.Name.GetString()}</td>";
                         temp += "</tr>";
                     }
@@ -714,9 +710,7 @@ namespace HsMod
             {
                 string temp = @"<table border=0 style=""text-align: center;""><tr>";
                 temp += "<th>索引</th>";
-                temp += "<th>卡牌ID</th>";
                 temp += "<th>名称</th>";
-                temp += "<th>职业</th>";
                 temp += "<th>类型</th>";
                 temp += "</tr>";
 
@@ -726,19 +720,7 @@ namespace HsMod
                     {
                         temp += "<tr>";
                         temp += $"<td>{record.CardId}</td>";
-                        string cardStringId = "";
-                        string className = "";
-                        try { cardStringId = GameUtils.TranslateDbIdToCardId(record.CardId); } catch { }
-                        try
-                        {
-                            var entityDef = DefLoader.Get()?.GetEntityDef(record.CardId);
-                            if (entityDef != null)
-                                className = GameStrings.GetClassName(entityDef.GetClass());
-                        }
-                        catch { }
-                        temp += $"<td>{cardStringId}</td>";
                         temp += $"<td>{GameDbf.Card.GetRecord(record.CardId).Name.GetString()}</td>";
-                        temp += $"<td>{className}</td>";
                         switch (record.HeroType)
                         {
                             case Assets.CardHero.HeroType.BATTLEGROUNDS_HERO:
@@ -1002,6 +984,28 @@ namespace HsMod
         public static StringBuilder AlivePage()
         {
             return new StringBuilder().Append($"{{\"pid\":{System.Diagnostics.Process.GetCurrentProcess()?.Id},\"login\":\"{Utils.CacheLoginStatus}\"}}");
+        }
+
+        public static StringBuilder ConfigPage()
+        {
+            StringBuilder builder = new StringBuilder();
+            builder.AppendLine(@"<h3 style=""text-align: center;"">" + LocalizationManager.GetLangValue("config.page.title") + "</h3>");
+
+            string configHtml = FileManager.ReadEmbeddedFile("./WebResources/config.html");
+            configHtml = configHtml
+                .Replace("{config.page.language}", LocalizationManager.GetLangValue("config.page.language"))
+                .Replace("{config.page.lang.auto}", LocalizationManager.GetLangValue("config.page.lang.auto"))
+                .Replace("{config.page.search}", LocalizationManager.GetLangValue("config.page.search"))
+                .Replace("{config.page.success}", LocalizationManager.GetLangValue("config.page.success"))
+                .Replace("{config.page.error}", LocalizationManager.GetLangValue("config.page.error"))
+                .Replace("{config.page.advanced}", LocalizationManager.GetLangValue("config.page.advanced"))
+                .Replace("{config.page.warning}", LocalizationManager.GetLangValue("config.page.warning"))
+                .Replace("{config.page.warning.desc}", LocalizationManager.GetLangValue("config.page.warning.desc"))
+                .Replace("{config.page.cancel}", LocalizationManager.GetLangValue("config.page.cancel"))
+                .Replace("{config.page.confirm}", LocalizationManager.GetLangValue("config.page.confirm"));
+
+            builder.AppendLine(configHtml);
+            return Template(builder, "Config");
         }
 
         public static StringBuilder BepInExLogPage(int lines = -1)

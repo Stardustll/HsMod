@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -183,10 +183,6 @@
     </Reference>
     <Reference Include="Polly">
       <HintPath>LibHearthstone\Polly.dll</HintPath>
-    </Reference>
-    <Reference Include="QRCoderUnity, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <SpecificVersion>False</SpecificVersion>
-      <HintPath>LibHearthstone\QRCoderUnity.dll</HintPath>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Configuration">
@@ -393,14 +389,22 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="FileManager.cs" />
+        <Compile Include="FileManager.cs" />
     <Compile Include="LocalizationManager.cs" />
-    <Compile Include="PetEntityInjector.cs" />
     <Compile Include="PluginConfig.cs" />
     <Compile Include="Patcher.cs" />
+    <Compile Include="Patches\Helpers.cs" />
+    <Compile Include="Patches\*.cs" Exclude="Patches\Helpers.cs" />
     <Compile Include="Main.cs" />
+    <Compile Include="ModSettingsUI.cs" />
+    <Compile Include="StorePanel.cs" />
+    <Compile Include="BgPetSpoofer.cs" />
+    <Compile Include="BgRankOverlay.cs" />
+    <Compile Include="BgSessionStats.cs" />
+    <Compile Include="BgAutoSquelch.cs" />
     <Compile Include="PluginInfo.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="UtilsFakePet.cs" />
     <Compile Include="UtilsSkins.cs" />
     <Compile Include="Utils.cs" />
     <Compile Include="UtilsArgu.cs" />
@@ -439,6 +443,9 @@
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="WebResources\about.zhCN.html" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="WebResources\config.html" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
