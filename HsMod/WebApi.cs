@@ -350,20 +350,30 @@ namespace HsMod
 
         //POST /api/skins：映射保存/删除 或 直接设置皮肤
         //body: {action:"save"|"delete"|"set", type, src, targets?[], id?}
+        //注意：不能用 Dictionary<string,object> 反序列化后做 is JArray 检查——Unity 裁剪版
+        //JArray 的 VTable 初始化失败（VTable setup of type ...JArray failed），必须强类型解析
+        private class SkinActionRequest
+        {
+            public string action { get; set; }
+            public string type { get; set; }
+            public int src { get; set; }
+            public int[] targets { get; set; }
+            public int id { get; set; }
+        }
+
         public static int HandleSkinAction(string body, out string res)
         {
             res = string.Empty;
             try
             {
-                var json = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(body);
-                if (json == null || !json.TryGetValue("action", out object actionObj))
+                SkinActionRequest req = Newtonsoft.Json.JsonConvert.DeserializeObject<SkinActionRequest>(body);
+                if (req == null || string.IsNullOrEmpty(req.action))
                 {
                     res = "invalid request";
                     return 400;
                 }
-                string action = actionObj.ToString();
-                string type = json.TryGetValue("type", out object typeObj) ? typeObj.ToString() : "";
-                SkinPanel.SkinType? st = SkinPanel.ParseType(type);
+                string action = req.action;
+                SkinPanel.SkinType? st = SkinPanel.ParseType(req.type ?? "");
                 if (st == null)
                 {
                     res = "unknown skin type";
@@ -371,29 +381,29 @@ namespace HsMod
                 }
                 if (action == "save" || action == "delete")
                 {
-                    if (!json.TryGetValue("src", out object srcObj) || !int.TryParse(srcObj.ToString(), out int src) || src <= 0)
+                    if (req.src <= 0)
                     {
                         res = "invalid src";
                         return 400;
                     }
-                    List<int> targets = new List<int>();
                     if (action == "save")
                     {
-                        if (json.TryGetValue("targets", out object targetsObj) && targetsObj is Newtonsoft.Json.Linq.JArray arr)
+                        List<int> targets = new List<int>();
+                        if (req.targets != null)
                         {
-                            foreach (var token in arr)
-                                if (int.TryParse(token.ToString(), out int tid) && tid > 0) targets.Add(tid);
+                            foreach (int tid in req.targets)
+                                if (tid > 0) targets.Add(tid);
                         }
                         if (targets.Count == 0)
                         {
                             res = "no targets";
                             return 400;
                         }
-                        SkinPanel.SetMapping(src, targets);
+                        SkinPanel.SetMapping(req.src, targets);
                     }
                     else
                     {
-                        SkinPanel.SetMapping(src, null);
+                        SkinPanel.SetMapping(req.src, null);
                     }
                     SkinPanel.SaveMapping();
                     res = action == "save" ? "saved" : "deleted";
@@ -401,12 +411,7 @@ namespace HsMod
                 }
                 if (action == "set")
                 {
-                    if (!json.TryGetValue("id", out object idObj) || !int.TryParse(idObj.ToString(), out int id))
-                    {
-                        res = "invalid id";
-                        return 400;
-                    }
-                    SkinPanel.SetValue(st.Value, id > 0 ? id : -1);    //id<=0 表示取消设置
+                    SkinPanel.SetValue(st.Value, req.id > 0 ? req.id : -1);    //id<=0 表示取消设置
                     res = "set";
                     return 200;
                 }

@@ -993,6 +993,7 @@ namespace HsMod
 
             string configHtml = FileManager.ReadEmbeddedFile("./WebResources/config.html");
             configHtml = configHtml
+                .Replace("{config.page.title}", LocalizationManager.GetLangValue("config.page.title"))
                 .Replace("{config.page.language}", LocalizationManager.GetLangValue("config.page.language"))
                 .Replace("{config.page.lang.auto}", LocalizationManager.GetLangValue("config.page.lang.auto"))
                 .Replace("{config.page.search}", LocalizationManager.GetLangValue("config.page.search"))

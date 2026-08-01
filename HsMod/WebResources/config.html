@@ -251,8 +251,9 @@ function renderSkinGrid() {
         const hasImage = skinImageTypes.indexOf(st.type) >= 0;
         let cls = '';
         if (isHeroMappingType(st.type)) {
-            if (String(item.id) === String(st.source)) cls = ' mapping-source';
-            else if (st.targets.indexOf(String(item.id)) >= 0) cls = ' mapping-target';
+            //st.targets 为数字数组（来自 item.mapping/push(id)），必须用数字比较
+            if (item.id === st.source) cls = ' mapping-source';
+            else if (st.targets.indexOf(item.id) >= 0) cls = ' mapping-target';
             else if (item.mapping && item.mapping.length) cls = ' selected';
         } else {
             if (String(item.id) === String(st.curVal)) cls = ' selected';
