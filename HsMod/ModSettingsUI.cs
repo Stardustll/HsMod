@@ -37,6 +37,12 @@ namespace HsMod
         private bool showAdvanced;
         private bool showStats;    //酒馆战绩页
         private bool showStore;    //商店零元购页
+        private bool showSkins;    //皮肤选择页
+        private int skinMapSource = -1;    //英雄映射选中的原始皮肤ID（-1 未选）
+        private SkinPanel.SkinType skinMapType = SkinPanel.SkinType.Hero;    //映射操作所属类型（取 source 名称用）
+        private readonly List<int> skinMapTargets = new List<int>();    //选中的目标皮肤ID列表
+        private readonly HashSet<SkinPanel.SkinType> skinExpanded = new HashSet<SkinPanel.SkinType>();    //皮肤页展开的大分类（默认全部折叠）
+        private readonly HashSet<string> skinClassExpanded = new HashSet<string>();    //英雄页展开的职业组（默认全部折叠）
         private bool miniMode;    //购买后最小化，避免 IMGUI 覆盖 NGUI 购买弹窗
 
         //战绩页筛选：时间段（0今天/1七天/2月/3全部）与模式（0单人/1双人），
@@ -49,6 +55,7 @@ namespace HsMod
         private Vector2 sectionScroll;
         private Vector2 entryScroll;
         private Vector2 storeScroll;
+        private Vector2 skinsScroll;
         private Vector2 windowPos = new Vector2(-1f, -1f);
         private bool dragging;
         private Vector2 dragOffset;
@@ -151,6 +158,9 @@ namespace HsMod
             return tex;
         }
 
+        private GUIStyle skinStateStyle;    //悬浮面板状态文本（金色，超宽裁剪）
+        private GUIStyle skinTipStyle;    //悬浮面板提示文本（灰色，超宽裁剪）
+
         private static GUIStyle MakeStyle(int fontSize, FontStyle fontStyle, TextAnchor anchor, Color textColor, Texture2D background, RectOffset padding)
         {
             GUIStyle style = new GUIStyle();
@@ -203,6 +213,11 @@ namespace HsMod
             filterStyle = MakeStyle(12, FontStyle.Normal, TextAnchor.MiddleCenter, grayColor, texButton, new RectOffset(10, 10, 5, 5));
             filterActiveStyle = MakeStyle(12, FontStyle.Bold, TextAnchor.MiddleCenter, Color.white, texSelected, new RectOffset(10, 10, 5, 5));
 
+            skinStateStyle = MakeStyle(14, FontStyle.Bold, TextAnchor.MiddleLeft, goldColor, null, null);
+            skinStateStyle.clipping = TextClipping.Clip;
+            skinTipStyle = MakeStyle(12, FontStyle.Normal, TextAnchor.MiddleLeft, grayColor, null, null);
+            skinTipStyle.clipping = TextClipping.Clip;
+
             stylesReady = true;
         }
 
@@ -243,11 +258,14 @@ namespace HsMod
             windowPos.x = Mathf.Clamp(windowPos.x, 240f - width, screenWidth - 240f);
             windowPos.y = Mathf.Clamp(windowPos.y, 0f, screenHeight - 40f);
             Rect windowRect = new Rect(windowPos.x, windowPos.y, width, height);
+            Rect floatingRect = showSkins ? GetSkinFloatingRect(windowRect, screenWidth) : new Rect(0f, 0f, 0f, 0f);
 
             HandleKeyEvents();
 
-            //点击窗口外部关闭菜单（与游戏原生模态窗一致）
-            if (Event.current.type == EventType.MouseDown && !windowRect.Contains(Event.current.mousePosition))
+            //点击窗口外部关闭菜单（与游戏原生模态窗一致）；悬浮映射面板在窗口外，点击它不关闭
+            if (Event.current.type == EventType.MouseDown
+                && !windowRect.Contains(Event.current.mousePosition)
+                && !floatingRect.Contains(Event.current.mousePosition))
             {
                 Event.current.Use();
                 SetVisible(false);
@@ -260,6 +278,76 @@ namespace HsMod
             GUILayout.BeginArea(windowRect);
             DrawWindow(windowRect);
             GUILayout.EndArea();
+
+            DrawSkinMappingFloating(windowRect, screenWidth);    //悬浮映射操作区（窗口右侧外部）
+        }
+
+        //悬浮映射面板位置：窗口右侧外部（不覆盖窗口内容，避免点击穿透到背后选项）
+        private Rect GetSkinFloatingRect(Rect windowRect, float screenWidth)
+        {
+            float x = windowRect.x + windowRect.width + 10f;
+            float panelW = Mathf.Clamp(screenWidth - x - 10f, 230f, 320f);
+            x = Mathf.Max(x, screenWidth - panelW - 10f);    //窗口贴右时面板收进屏幕
+            float panelH = skinMapSource >= 0 ? 78f : 34f;
+            return new Rect(x, windowRect.y + windowRect.height - panelH - 10f, panelW, panelH);
+        }
+
+        //悬浮映射操作区：选中原始皮肤后显示保存/删除/取消按钮，
+        //避免操作按钮被折叠/滚动隐藏，方便用户确认
+        private void DrawSkinMappingFloating(Rect windowRect, float screenWidth)
+        {
+            if (!showSkins) return;
+
+            Rect panelRect = GetSkinFloatingRect(windowRect, screenWidth);
+            GUI.DrawTexture(panelRect, texHeader);
+
+            if (skinMapSource < 0)
+            {
+                GUI.Label(new Rect(panelRect.x + 10f, panelRect.y + 7f, panelRect.width - 20f, panelRect.height - 14f),
+                    C(LocalizationManager.GetLangValue("skin.mapTip")), skinTipStyle);
+                return;
+            }
+
+            string sourceName = TruncateSkinName(
+                SkinPanel.GetList(skinMapType).FirstOrDefault(i => i.Id == skinMapSource)?.Name
+                ?? skinMapSource.ToString());
+            string stateText = string.Format(LocalizationManager.GetLangValue("skin.mapHint"), sourceName);
+            GUI.Label(new Rect(panelRect.x + 10f, panelRect.y + 6f, panelRect.width - 20f, 24f), C(stateText), skinStateStyle);
+
+            //按钮从右往左排列：保存 / 删除 / 取消
+            const float gap = 6f;
+            float btnY = panelRect.y + 36f;
+            float x = panelRect.x + panelRect.width - 10f;
+            if (skinMapTargets.Count > 0)
+            {
+                x -= 76f;
+                if (GUI.Button(new Rect(x, btnY, 76f, 30f), C(LocalizationManager.GetLangValue("skin.saveMapping")), onStyle))
+                {
+                    SkinPanel.SetMapping(skinMapSource, skinMapTargets);
+                    SkinPanel.SaveMapping();
+                    ResetSkinMapping();
+                    UIStatus.Get()?.AddInfo(LocalizationManager.GetLangValue("skin.saved"));
+                }
+                x -= gap;
+            }
+            if (SkinPanel.HasMapping(skinMapSource))
+            {
+                x -= 76f;
+                if (GUI.Button(new Rect(x, btnY, 76f, 30f), C(LocalizationManager.GetLangValue("skin.deleteMapping")), buttonStyle))
+                {
+                    SkinPanel.SetMapping(skinMapSource, null);
+                    SkinPanel.SaveMapping();
+                    ResetSkinMapping();
+                    UIStatus.Get()?.AddInfo(LocalizationManager.GetLangValue("skin.deleted"));
+                }
+                x -= gap;
+            }
+            //取消选择（×）
+            x -= 40f;
+            if (GUI.Button(new Rect(x, btnY, 40f, 30f), C("×"), offStyle))
+            {
+                ResetSkinMapping();
+            }
         }
 
         //手动拖拽标题栏（右侧按钮区不参与拖拽）
@@ -300,8 +388,21 @@ namespace HsMod
             GUILayout.BeginHorizontal();
             GUILayout.Space(8f);
 
-            //左栏：搜索 + 分类 + 高级开关
+            //左栏：皮肤 / 搜索 + 分类 + 高级开关
             GUILayout.BeginVertical(GUILayout.Width(216f));
+            if (GUILayout.Button(C(LocalizationManager.GetLangValue("skin.tab")), showSkins ? sectionSelectedStyle : sectionStyle, GUILayout.Height(30f)))
+            {
+                showSkins = !showSkins;
+                showStats = false;
+                showStore = false;
+                ResetSkinMapping();
+                searchText = "";
+                ClearBuffer();
+                entryScroll = Vector2.zero;
+                skinsScroll = Vector2.zero;
+                if (showSkins) SkinPanel.Invalidate();    //打开皮肤页时重新读取 DBF 与映射表
+            }
+            GUILayout.Space(4f);
             GUILayout.BeginHorizontal();
             GUILayout.Label(C(LocalizationManager.GetLangValue("config.page.search")), hintStyle, GUILayout.Width(50f));
             string newSearch = GUILayout.TextField(searchText, fieldStyle, GUILayout.Height(26f));
@@ -310,6 +411,8 @@ namespace HsMod
                 searchText = newSearch;
                 showStats = false;
                 showStore = false;
+                showSkins = false;
+                ResetSkinMapping();
                 ClearBuffer();
                 entryScroll = Vector2.zero;
             }
@@ -330,6 +433,8 @@ namespace HsMod
                     searchText = "";
                     showStats = false;
                     showStore = false;
+                    showSkins = false;
+                    ResetSkinMapping();
                     ClearBuffer();
                     entryScroll = Vector2.zero;
                 }
@@ -342,6 +447,8 @@ namespace HsMod
             {
                 showStats = !showStats;
                 showStore = false;
+                showSkins = false;
+                ResetSkinMapping();
                 searchText = "";
                 ClearBuffer();
                 entryScroll = Vector2.zero;
@@ -355,6 +462,8 @@ namespace HsMod
                 {
                     showStore = !showStore;
                     showStats = false;
+                    showSkins = false;
+                    ResetSkinMapping();
                     searchText = "";
                     ClearBuffer();
                     entryScroll = Vector2.zero;
@@ -376,12 +485,14 @@ namespace HsMod
 
             GUILayout.Space(10f);
 
-            //右栏：配置项列表 / 酒馆战绩 / 商店
+            //右栏：配置项列表 / 酒馆战绩 / 商店 / 皮肤
             GUILayout.BeginVertical();
             if (showStore && !PluginConfig.isStoreEnable.Value)
                 showStore = false;    //开关关闭时退出商店页
             if (showStore)
                 storeScroll = GUILayout.BeginScrollView(storeScroll);
+            else if (showSkins)
+                skinsScroll = GUILayout.BeginScrollView(skinsScroll);
             else
                 entryScroll = GUILayout.BeginScrollView(entryScroll);
             if (showStats)
@@ -391,6 +502,10 @@ namespace HsMod
             else if (showStore)
             {
                 DrawStore();
+            }
+            else if (showSkins)
+            {
+                DrawSkins();
             }
             else
             {
@@ -668,6 +783,198 @@ namespace HsMod
                 GUILayout.EndVertical();
                 GUILayout.Space(3f);
             }
+        }
+
+        //皮肤选择页：非英雄类直接设置，英雄类（对战/酒馆）为映射模式（原始皮肤:目标皮肤）
+        private void DrawSkins()
+        {
+            GUILayout.Label(C(LocalizationManager.GetLangValue("skin.title")), titleStyle);
+            GUILayout.Space(6f);
+
+            SkinPanel.SkinType[] types =
+            {
+                SkinPanel.SkinType.CardBack,
+                SkinPanel.SkinType.Coin,
+                SkinPanel.SkinType.Board,
+                SkinPanel.SkinType.BgsBoard,
+                SkinPanel.SkinType.Finisher,
+                SkinPanel.SkinType.Hero,
+                SkinPanel.SkinType.BgsHero,
+                SkinPanel.SkinType.Bob,
+                SkinPanel.SkinType.Pet
+            };
+
+            foreach (SkinPanel.SkinType type in types)
+            {
+                bool expanded = skinExpanded.Contains(type);    //大分类默认全部折叠
+                int count = SkinPanel.GetList(type).Count;
+                string mark = expanded ? "[v]" : "[>]";
+                if (GUILayout.Button(C($"{mark} {GetSkinSectionTitle(type)} ({count})"), sectionStyle, GUILayout.Height(28f)))
+                {
+                    if (expanded) skinExpanded.Remove(type);
+                    else skinExpanded.Add(type);
+                }
+                GUILayout.Space(2f);
+                if (!expanded) continue;
+
+                if (SkinPanel.IsHeroMappingType(type))
+                {
+                    DrawHeroMappingSection(type);
+                }
+                else
+                {
+                    DrawDirectSection(type);
+                }
+                GUILayout.Space(6f);
+            }
+        }
+
+        //非英雄类：点击直接写入配置
+        private void DrawDirectSection(SkinPanel.SkinType type)
+        {
+            int current = SkinPanel.GetCurrentValue(type);
+            List<SkinPanel.SkinItem> items = SkinPanel.GetList(type);
+            if (current > 0)
+            {
+                string curName = items.FirstOrDefault(i => i.Id == current)?.Name;
+                GUILayout.Label(C(LocalizationManager.GetLangValue("skin.current") + (curName ?? current.ToString())), hintStyle);
+                GUILayout.Space(2f);
+            }
+
+            if (items.Count == 0)
+            {
+                GUILayout.Label(C(LocalizationManager.GetLangValue("skin.empty")), descStyle);
+                return;
+            }
+
+            GUILayout.BeginHorizontal();    //选项按钮流：等宽填满整行，按可用宽度决定每行数量
+            int shown = 0;
+            foreach (SkinPanel.SkinItem item in items)
+            {
+                if (shown > 0 && shown % 3 == 0)
+                {
+                    GUILayout.EndHorizontal();
+                    GUILayout.BeginHorizontal();
+                }
+                if (GUILayout.Button(C(TruncateSkinName(item.Name)), item.Id == current ? onStyle : buttonStyle, GUILayout.MinWidth(140f), GUILayout.ExpandWidth(true), GUILayout.Height(26f)))
+                {
+                    if (item.Id == current)
+                    {
+                        SkinPanel.SetValue(type, -1);    //再次点击取消选择
+                    }
+                    else
+                    {
+                        SkinPanel.SetValue(type, item.Id);
+                    }
+                    UIStatus.Get()?.AddInfo(item.Name);
+                }
+                shown++;
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        //英雄类：按职业分组，先点原始皮肤，再点目标皮肤（可多选），保存写入 HsSkins.cfg
+        private void DrawHeroMappingSection(SkinPanel.SkinType type)
+        {
+            List<SkinPanel.SkinItem> items = SkinPanel.GetList(type);
+            if (items.Count == 0)
+            {
+                GUILayout.Label(C(LocalizationManager.GetLangValue("skin.empty")), descStyle);
+                return;
+            }
+
+            //按职业分组：未分类（ClassId<0）排最后
+            var groups = items.GroupBy(i => i.ClassId >= 0 ? i.ClassId : int.MaxValue)
+                              .OrderBy(g => g.Key == int.MaxValue ? 1 : 0)
+                              .ThenBy(g => g.Key)
+                              .ToList();
+            foreach (var group in groups)
+            {
+                int classId = group.Key == int.MaxValue ? -1 : group.Key;
+                string groupKey = type + "_" + classId;
+                bool expanded = skinClassExpanded.Contains(groupKey);
+                string mark = expanded ? "[v]" : "[>]";
+                GUILayout.BeginHorizontal();    //职业标题相对大分类缩进，便于区分层级
+                GUILayout.Space(16f);
+                if (GUILayout.Button(C($"{mark} {SkinPanel.GetClassName(classId)} ({group.Count()})"), sectionStyle, GUILayout.Height(26f)))
+                {
+                    if (expanded) skinClassExpanded.Remove(groupKey);
+                    else skinClassExpanded.Add(groupKey);
+                }
+                GUILayout.EndHorizontal();
+                GUILayout.Space(2f);
+                if (!expanded) continue;    //默认全部折叠，展开才显示该职业皮肤
+
+                GUILayout.BeginHorizontal();    //选项按钮流：等宽填满整行，按可用宽度决定每行数量
+                int shown = 0;
+                foreach (SkinPanel.SkinItem item in group)
+                {
+                    bool isSource = item.Id == skinMapSource;
+                    bool isTarget = skinMapTargets.Contains(item.Id);
+                    List<int> mapped = SkinPanel.HasMapping(item.Id) ? SkinPanel.GetMappingTargets(item.Id) : null;
+                    GUIStyle style = isSource ? onStyle : (isTarget ? sectionSelectedStyle : (mapped != null ? offStyle : buttonStyle));
+                    string label = TruncateSkinName(item.Name);
+                    if (mapped != null && !isSource && !isTarget)
+                        label += "→" + mapped.Count;    //已映射标记
+                    if (shown > 0 && shown % 3 == 0)
+                    {
+                        GUILayout.EndHorizontal();
+                        GUILayout.BeginHorizontal();
+                    }
+                    if (GUILayout.Button(C(label), style, GUILayout.MinWidth(140f), GUILayout.ExpandWidth(true), GUILayout.Height(26f)))
+                    {
+                        if (skinMapSource < 0)
+                        {
+                            skinMapSource = item.Id;    //第一步：选择原始皮肤，预载已有映射目标
+                            skinMapType = type;
+                            skinMapTargets.Clear();
+                            skinMapTargets.AddRange(SkinPanel.GetMappingTargets(item.Id));
+                        }
+                        else if (item.Id == skinMapSource)
+                        {
+                            skinMapSource = -1;    //点击原始皮肤自身 = 取消选择
+                            skinMapTargets.Clear();
+                        }
+                        else
+                        {
+                            if (!skinMapTargets.Remove(item.Id))
+                                skinMapTargets.Add(item.Id);    //切换目标皮肤（多选）
+                        }
+                    }
+                    shown++;
+                }
+                GUILayout.EndHorizontal();
+                GUILayout.Space(4f);
+            }
+        }
+
+        private void ResetSkinMapping()
+        {
+            skinMapSource = -1;
+            skinMapTargets.Clear();
+        }
+
+        private static string GetSkinSectionTitle(SkinPanel.SkinType type)
+        {
+            switch (type)
+            {
+                case SkinPanel.SkinType.CardBack: return LocalizationManager.GetLangValue("skinCardBack.name");
+                case SkinPanel.SkinType.Coin: return LocalizationManager.GetLangValue("skinCoin.name");
+                case SkinPanel.SkinType.Board: return LocalizationManager.GetLangValue("skinBoard.name");
+                case SkinPanel.SkinType.BgsBoard: return LocalizationManager.GetLangValue("skinBgsBoard.name");
+                case SkinPanel.SkinType.Finisher: return LocalizationManager.GetLangValue("skinBgsFinisher.name");
+                case SkinPanel.SkinType.Hero: return LocalizationManager.GetLangValue("skinHero.name");
+                case SkinPanel.SkinType.BgsHero: return LocalizationManager.GetLangValue("skin.bgsHero");
+                case SkinPanel.SkinType.Bob: return LocalizationManager.GetLangValue("skinBob.name");
+                case SkinPanel.SkinType.Pet: return LocalizationManager.GetLangValue("skinPet.name");
+                default: return type.ToString();
+            }
+        }
+
+        private static string TruncateSkinName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "-";
+            return name.Length > 10 ? name.Substring(0, 10) + "…" : name;
         }
 
         //柱状图：左侧固定刻度列 + 可横向滚动的柱区（固定槽宽），默认滚到最新一场。

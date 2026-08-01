@@ -398,6 +398,7 @@
     <Compile Include="Main.cs" />
     <Compile Include="ModSettingsUI.cs" />
     <Compile Include="StorePanel.cs" />
+    <Compile Include="SkinPanel.cs" />
     <Compile Include="BgPetSpoofer.cs" />
     <Compile Include="BgRankOverlay.cs" />
     <Compile Include="BgSessionStats.cs" />
