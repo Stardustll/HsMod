@@ -57,14 +57,32 @@ namespace HsMod
         public static string CacheEnUSLangJson = "";
         public static Dictionary<string, string> CacheCurrentLangJsonObj = null;
         public static Dictionary<string, string> CacheEnUSLangJsonObj = null;
+        private static string cachedCurrentLangName;
+
+        //语言切换（pluginLanague/pluginInitLanague 变化）后必须重建当前语言缓存，否则显示名反查会失败
+        private static void EnsureCurrentLangCache()
+        {
+            string currentLang = string.IsNullOrEmpty(pluginInitLanague.Value) ? "enUS" : pluginInitLanague.Value;
+            if (cachedCurrentLangName != currentLang || CacheCurrentLangJsonObj == null)
+            {
+                cachedCurrentLangName = currentLang;
+                CacheCurrentLangJson = GetLangFileContext(currentLang);
+                CacheCurrentLangJsonObj = JsonConvert.DeserializeObject<Dictionary<string, string>>(CacheCurrentLangJson);
+            }
+        }
+
+        private static void EnsureEnUSLangCache()
+        {
+            if (CacheEnUSLangJsonObj == null)
+            {
+                CacheEnUSLangJson = GetLangFileContext("enUS");
+                CacheEnUSLangJsonObj = JsonConvert.DeserializeObject<Dictionary<string, string>>(CacheEnUSLangJson);
+            }
+        }
 
         public static string GetLangValue(string lang_key)
         {
-            if (String.IsNullOrEmpty(CacheCurrentLangJson))
-            {
-                CacheCurrentLangJson = GetLangFileContext(pluginInitLanague.Value);
-                CacheCurrentLangJsonObj = JsonConvert.DeserializeObject<Dictionary<string, string>>(CacheCurrentLangJson);
-            }
+            EnsureCurrentLangCache();
 
             string res;
             if (CacheCurrentLangJsonObj.TryGetValue(lang_key, out res))
@@ -74,11 +92,7 @@ namespace HsMod
             else
             {
                 //Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"Languages key '{lang_key}' not found.");
-                if (String.IsNullOrEmpty(CacheEnUSLangJson))
-                {
-                    CacheEnUSLangJson = GetLangFileContext("enUS");
-                    CacheEnUSLangJsonObj = JsonConvert.DeserializeObject<Dictionary<string, string>>(CacheEnUSLangJson);
-                }
+                EnsureEnUSLangCache();
                 if (CacheEnUSLangJsonObj.TryGetValue(lang_key, out res))
                 {
                     return res;
@@ -88,38 +102,55 @@ namespace HsMod
             }
         }
 
+        //enUS 固定值，用于配置文件中语言无关的 section（如 "Global"、"Shortcut"），不受当前语言影响
+        public static string GetEnUSLangValue(string lang_key)
+        {
+            EnsureEnUSLangCache();
+
+            string res;
+            if (CacheEnUSLangJsonObj.TryGetValue(lang_key, out res))
+            {
+                return res;
+            }
+            return lang_key;
+        }
+
+        //读取指定语言文件的原始字典；读取或解析失败时返回 null
+        public static Dictionary<string, string> GetLangDict(string lang)
+        {
+            try
+            {
+                string json = FileManager.ReadEmbeddedFile($"./Languages/{lang}.json");
+                if (string.IsNullOrEmpty(json))
+                {
+                    return null;
+                }
+                return JsonConvert.DeserializeObject<Dictionary<string, string>>(json);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         public static string GetLangKey(string lang_value)
         {
-            if (String.IsNullOrEmpty(CacheCurrentLangJson))
-            {
-                CacheCurrentLangJson = GetLangFileContext(pluginInitLanague.Value);
-                CacheCurrentLangJsonObj = JsonConvert.DeserializeObject<Dictionary<string, string>>(CacheCurrentLangJson);
-            }
+            EnsureCurrentLangCache();
 
             foreach (var key in CacheCurrentLangJsonObj)
             {
-                if (key.Value == lang_value)
+                if (key.Value == lang_value && key.Key.EndsWith(".name"))
                 {
-                    if (key.Key.EndsWith(".name"))
-                    {
-                        return key.Key;
-                    }
+                    return key.Key;
                 }
             }
-            if (String.IsNullOrEmpty(CacheEnUSLangJson))
-            {
-                CacheEnUSLangJson = GetLangFileContext("enUS");
-                CacheEnUSLangJsonObj = JsonConvert.DeserializeObject<Dictionary<string, string>>(CacheEnUSLangJson);
-            }
+            EnsureEnUSLangCache();
 
             foreach (var key in CacheEnUSLangJsonObj)
             {
-                if (key.Value == lang_value)
+                if (key.Value == lang_value && key.Key.EndsWith(".name"))
                 {
-                    if (key.Key.EndsWith("name"))
-                    {
-                        return key.Key;
-                    }
+                    return key.Key;
                 }
             }
 

@@ -17,7 +17,7 @@
 	"isPluginEnable.description": "Включить или выключить плагин (после изменения рекомендуется перезапустить Hearthstone)",
 	"pluginLanague.name": "Язык HsMod",
 	"pluginLanague.label": "Основные",
-	"pluginLanague.description": "Предпочитаемый язык плагина (требует перезапуска Hearthstone; может сделать старую конфигурацию недействительной — сделайте резервную копию HsMod.cfg)",
+	"pluginLanague.description": "Предпочитаемый язык плагина (требует перезапуска Hearthstone после изменения)",
 	"configTemplate.name": "Шаблон конфигурации",
 	"configTemplate.label": "Основные",
 	"configTemplate.description": "Шаблон применения настроек; при значении DoNothing изменения не вносятся. После применения автоматически возвращается в DoNothing",

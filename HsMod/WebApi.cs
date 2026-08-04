@@ -127,31 +127,48 @@ namespace HsMod
         {
             res = string.Empty;
 
-            if (!string.IsNullOrEmpty(key) && (key.Length > 5))
+            if (string.IsNullOrEmpty(key))
+            {
+                return 500;
+            }
+
+            if (key.EndsWith(".name"))
             {
                 key = key.Substring(0, key.Length - 5); // remove .name
-                if (key.Equals("isWebshellEnable"))
-                {
-                    res = "not allow.";
-                    return 403;
-                }
-                var configKeyProp = typeof(PluginConfig).GetField(key, BindingFlags.Public | BindingFlags.Static);
-                if (configKeyProp == null)
-                {
-                    res = "key not found.";
-                    return 501;
-
-                }
-                var configEntry = (ConfigEntryBase)configKeyProp.GetValue(null);
-                var converter = TomlTypeConverter.GetConverter(configEntry.SettingType);
-                if (converter != null)
-                {
-                    configEntry.SetSerializedValue(value);
-                    res = configEntry.GetSerializedValue();
-                    return 200;
-                }
+            }
+            if (key.Equals("isWebshellEnable"))
+            {
+                res = "not allow.";
+                return 403;
+            }
+            var configKeyProp = typeof(PluginConfig).GetField(key, BindingFlags.Public | BindingFlags.Static);
+            if (configKeyProp == null || !configKeyProp.FieldType.IsGenericType || configKeyProp.FieldType.GetGenericTypeDefinition() != typeof(ConfigEntry<>))
+            {
+                res = "key not found.";
+                return 501;
+            }
+            var configEntry = (ConfigEntryBase)configKeyProp.GetValue(null);
+            var converter = TomlTypeConverter.GetConverter(configEntry.SettingType);
+            if (converter != null)
+            {
+                configEntry.SetSerializedValue(value);
+                res = configEntry.GetSerializedValue();
+                return 200;
             }
             return 500;
+        }
+
+        //判断是否为 PluginConfig 中可保存的配置字段名（语言无关，如 isPluginEnable）
+        public static bool IsValidConfigFieldName(string key)
+        {
+            if (string.IsNullOrEmpty(key))
+            {
+                return false;
+            }
+            var configKeyProp = typeof(PluginConfig).GetField(key, BindingFlags.Public | BindingFlags.Static);
+            return configKeyProp != null
+                && configKeyProp.FieldType.IsGenericType
+                && configKeyProp.FieldType.GetGenericTypeDefinition() == typeof(ConfigEntry<>);
         }
 
         public static string GetAllConfigMetadata(string lang = null)

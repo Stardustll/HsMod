@@ -139,8 +139,14 @@ namespace HsMod
                             }
                             else
                             {
-                                string realConfigKey = key.EndsWith(".name") ? key : LocalizationManager.GetLangKey(key);
-                                if (!realConfigKey.EndsWith(".name"))
+                                string realConfigKey = key;
+                                // 优先接受语言无关的字段名（isPluginEnable / isPluginEnable.name）；
+                                // 旧客户端（如外部管理工具）会发送本地化显示名，再反查字段名
+                                if (!realConfigKey.EndsWith(".name") && !WebApi.IsValidConfigFieldName(realConfigKey))
+                                {
+                                    realConfigKey = LocalizationManager.GetLangKey(realConfigKey);
+                                }
+                                if (!realConfigKey.EndsWith(".name") && !WebApi.IsValidConfigFieldName(realConfigKey))
                                 {
                                     context.Response.StatusCode = 400; // Bad Request
                                     output = "Invalid request: key not found.";
@@ -172,6 +178,15 @@ namespace HsMod
                     {
                         await writer.WriteLineAsync($"{{\"status\":{context.Response.StatusCode},\"output\":\"{output}\"}}");
                     }
+                }
+            }
+            else if ((rawUrLower == "/config" || rawUrLower == "/config/index.html") && request.HttpMethod == "GET")
+            {
+                // 配置页固定使用内置页面：屏蔽部署在 HsModWebSite/config/ 下的外部管理工具
+                context.Response.ContentType = "text/html; charset=UTF-8";
+                using (var writer = new StreamWriter(context.Response.OutputStream))
+                {
+                    await writer.WriteLineAsync(Route("/config").ToString());
                 }
             }
             else if (rawUrLower == "/update" && request.HttpMethod == "POST" && !updateLock)
@@ -313,7 +328,7 @@ namespace HsMod
                 context.Response.ContentType = DetermineContentType(rawUrLower);
 
                 string preUrl = DetermineFilePath(rawUrLower);
-                if (VaildFilePath(preUrl))   // 优先查找本地文件
+                if (VaildFilePath(preUrl) && !rawUrLower.StartsWith("/config/"))   // 优先查找本地文件（config/ 目录由内置配置页接管）
                 {
                     context.Response.ContentType = GetMimeType(Path.GetExtension(preUrl));
                     var file = await File.ReadAllBytesAsync(preUrl);

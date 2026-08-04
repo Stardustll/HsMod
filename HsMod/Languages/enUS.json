@@ -17,7 +17,7 @@
 	"isPluginEnable.description": "Enable or disable the plugin (suggested to restart Hearthstone after changing this setting)",
 	"pluginLanague.name": "HsMod Language",
 	"pluginLanague.label": "Global",
-	"pluginLanague.description": "Preferred language of the plugin (requires Hearthstone restart after change, and may invalidate old configuration; remember to back up HsMod.cfg)",
+	"pluginLanague.description": "Preferred language of the plugin (requires Hearthstone restart after change)",
 	"configTemplate.name": "Configuration Template",
 	"configTemplate.label": "Global",
 	"configTemplate.description": "Configuration run template; when set to DoNothing, no configuration changes are made. Automatically reverts to DoNothing after configuration change",

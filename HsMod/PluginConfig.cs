@@ -1,7 +1,8 @@
-﻿using BepInEx.Configuration;
+using BepInEx.Configuration;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using UnityEngine;
 
 namespace HsMod
@@ -186,8 +187,169 @@ namespace HsMod
 
         public static List<Utils.CardMapping> CardsMapping = new List<Utils.CardMapping>();    //卡片替换映射，目前暂未使用
         public static IGraphicsManager graphicsManager;
+
+        //旧版本把本地化显示名当作配置 section/key 写入 HsMod.cfg，切换语言后 key 不匹配，
+        //旧值被视为新项（回默认值），表现为"配置失效"。启动时把旧 key 一次性迁移为
+        //语言无关的字段名 key（section 使用 enUS 固定分组名），此后语言切换不再影响配置。
+        private static void MigrateLegacyConfig(ConfigFile config)
+        {
+            try
+            {
+                string configPath = config.ConfigFilePath;
+                if (string.IsNullOrEmpty(configPath) || !File.Exists(configPath))
+                {
+                    return;
+                }
+
+                string[] lines;
+                try
+                {
+                    lines = File.ReadAllLines(configPath, Encoding.UTF8);
+                }
+                catch
+                {
+                    return;
+                }
+
+                //解析当前 HsMod.cfg：保留 (section, key, value) 顺序，忽略注释与空行
+                List<Tuple<string, string, string>> fileEntries = new List<Tuple<string, string, string>>();
+                string currentSection = "";
+                foreach (string rawLine in lines)
+                {
+                    string line = rawLine.Trim();
+                    if (line.Length == 0 || line.StartsWith("#"))
+                    {
+                        continue;
+                    }
+                    if (line.StartsWith("[") && line.EndsWith("]"))
+                    {
+                        currentSection = line.Substring(1, line.Length - 2);
+                        continue;
+                    }
+                    int eqIndex = line.IndexOf('=');
+                    if (eqIndex <= 0)
+                    {
+                        continue;
+                    }
+                    string key = line.Substring(0, eqIndex).Trim();
+                    string value = line.Substring(eqIndex + 1).Trim();
+                    fileEntries.Add(Tuple.Create(currentSection, key, value));
+                }
+                if (fileEntries.Count == 0)
+                {
+                    return;
+                }
+
+                //从全部语言文件建立反向映射：本地化 (label, name) -> 字段名；字段名 -> enUS 固定 section
+                Dictionary<string, string> legacyNameToField = new Dictionary<string, string>();
+                Dictionary<string, string> stableSectionByField = new Dictionary<string, string>();
+                foreach (string lang in LocalizationManager.STRING_TO_LOCALE.Keys)
+                {
+                    Dictionary<string, string> langDict = LocalizationManager.GetLangDict(lang);
+                    if (langDict == null)
+                    {
+                        continue;
+                    }
+                    foreach (var kv in langDict)
+                    {
+                        if (!kv.Key.EndsWith(".name"))
+                        {
+                            continue;
+                        }
+                        string fieldName = kv.Key.Substring(0, kv.Key.Length - 5);
+                        string labelValue;
+                        if (langDict.TryGetValue(fieldName + ".label", out labelValue))
+                        {
+                            legacyNameToField[labelValue + "\u0001" + kv.Value] = fieldName;
+                        }
+                    }
+                }
+                Dictionary<string, string> enUSDict = LocalizationManager.GetLangDict("enUS");
+                if (enUSDict != null)
+                {
+                    foreach (var kv in enUSDict)
+                    {
+                        if (kv.Key.EndsWith(".label"))
+                        {
+                            stableSectionByField[kv.Key.Substring(0, kv.Key.Length - 6)] = kv.Value;
+                        }
+                    }
+                }
+                if (legacyNameToField.Count == 0)
+                {
+                    return;
+                }
+
+                //已存在的稳定 key 优先保留，迁移不覆盖更新的值
+                HashSet<string> existingStableKeys = new HashSet<string>();
+                foreach (var entry in fileEntries)
+                {
+                    if (!legacyNameToField.ContainsKey(entry.Item1 + "\u0001" + entry.Item2))
+                    {
+                        existingStableKeys.Add(entry.Item1 + "\u0001" + entry.Item2);
+                    }
+                }
+
+                bool migrated = false;
+                List<Tuple<string, string, string>> newEntries = new List<Tuple<string, string, string>>();
+                HashSet<string> addedStableKeys = new HashSet<string>();
+                foreach (var entry in fileEntries)
+                {
+                    string fieldName;
+                    if (legacyNameToField.TryGetValue(entry.Item1 + "\u0001" + entry.Item2, out fieldName))
+                    {
+                        string stableSection;
+                        if (!stableSectionByField.TryGetValue(fieldName, out stableSection))
+                        {
+                            stableSection = "HsMod";
+                        }
+                        string stableKey = fieldName;
+                        string stableLookup = stableSection + "\u0001" + stableKey;
+                        if (!existingStableKeys.Contains(stableLookup) && addedStableKeys.Add(stableLookup))
+                        {
+                            newEntries.Add(Tuple.Create(stableSection, stableKey, entry.Item3));
+                            migrated = true;
+                        }
+                    }
+                    else
+                    {
+                        newEntries.Add(entry);
+                    }
+                }
+                if (!migrated)
+                {
+                    return;
+                }
+
+                //重写配置文件为稳定 key（丢弃注释，BepInEx 保存时会自行补全），并让 BepInEx 重新解析
+                StringBuilder sb = new StringBuilder();
+                string lastSection = null;
+                foreach (var entry in newEntries)
+                {
+                    if (entry.Item1 != lastSection)
+                    {
+                        if (lastSection != null)
+                        {
+                            sb.AppendLine();
+                        }
+                        sb.Append('[').Append(entry.Item1).AppendLine("]");
+                        lastSection = entry.Item1;
+                    }
+                    sb.Append(entry.Item2).Append(" = ").AppendLine(entry.Item3);
+                }
+                File.WriteAllText(configPath, sb.ToString(), new UTF8Encoding(false));
+                config.Reload();
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"HsMod: migrated legacy localized config keys to stable keys: {configPath}");
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Error, $"HsMod: config migration failed: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
         public static void ConfigBind(ConfigFile config)
         {
+            MigrateLegacyConfig(config);
             config.Clear();
             pluginInitLanague = config.Bind("HsMod", "HsMod.Init.Language", "UNKNOWN", new ConfigDescription("(!!! DON'T EDIT IT, unless you know what you are doing) HsMod Init Language", null, new object[] { "Advanced" }));
             isEulaRead = config.Bind("HsMod", "HsMod.Init.Eula", false, new ConfigDescription("End-User License Agreement", null, new object[] { "Advanced" }));
@@ -204,159 +366,159 @@ namespace HsMod
             CreateHsModWorkDir();
 
 
-            isPluginEnable = config.Bind(LocalizationManager.GetLangValue("isPluginEnable.label"), LocalizationManager.GetLangValue("isPluginEnable.name"), true, LocalizationManager.GetLangValue("isPluginEnable.description"));
-            pluginLanague = config.Bind(LocalizationManager.GetLangValue("pluginLanague.label"), LocalizationManager.GetLangValue("pluginLanague.name"), LocalizationManager.StrToLocale(pluginInitLanague.Value), LocalizationManager.GetLangValue("pluginLanague.description"));
+            isPluginEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isPluginEnable.label"), "isPluginEnable", true, LocalizationManager.GetLangValue("isPluginEnable.description"));
+            pluginLanague = config.Bind(LocalizationManager.GetEnUSLangValue("pluginLanague.label"), "pluginLanague", LocalizationManager.StrToLocale(pluginInitLanague.Value), LocalizationManager.GetLangValue("pluginLanague.description"));
 
-            configTemplate = config.Bind(LocalizationManager.GetLangValue("configTemplate.label"), LocalizationManager.GetLangValue("configTemplate.name"), Utils.ConfigTemplate.DoNothing, LocalizationManager.GetLangValue("configTemplate.description"));
-            isShortcutsEnable = config.Bind(LocalizationManager.GetLangValue("isShortcutsEnable.label"), LocalizationManager.GetLangValue("isShortcutsEnable.name"), false, LocalizationManager.GetLangValue("isShortcutsEnable.description"));
-            isTimeGearEnable = config.Bind(LocalizationManager.GetLangValue("isTimeGearEnable.label"), LocalizationManager.GetLangValue("isTimeGearEnable.name"), false, LocalizationManager.GetLangValue("isTimeGearEnable.description"));
-            timeGear = config.Bind(LocalizationManager.GetLangValue("timeGear.label"), LocalizationManager.GetLangValue("timeGear.name"), 0f, new ConfigDescription(LocalizationManager.GetLangValue("timeGear.description"), new AcceptableValueRange<float>(-32, 32)));
-            isShowFPSEnable = config.Bind(LocalizationManager.GetLangValue("isShowFPSEnable.label"), LocalizationManager.GetLangValue("isShowFPSEnable.name"), false, LocalizationManager.GetLangValue("isShowFPSEnable.description"));
-            targetFrameRate = config.Bind(LocalizationManager.GetLangValue("targetFrameRate.label"), LocalizationManager.GetLangValue("targetFrameRate.name"), -1, new ConfigDescription(LocalizationManager.GetLangValue("targetFrameRate.description"), new AcceptableValueRange<int>(-1, 2333)));
-            isModSettingsButtonShow = config.Bind(LocalizationManager.GetLangValue("isModSettingsButtonShow.label"), LocalizationManager.GetLangValue("isModSettingsButtonShow.name"), true, LocalizationManager.GetLangValue("isModSettingsButtonShow.description"));
-            isStoreEnable = config.Bind(LocalizationManager.GetLangValue("isStoreEnable.label"), LocalizationManager.GetLangValue("isStoreEnable.name"), false, new ConfigDescription(LocalizationManager.GetLangValue("isStoreEnable.description"), null, new object[] { "Advanced" }));
+            configTemplate = config.Bind(LocalizationManager.GetEnUSLangValue("configTemplate.label"), "configTemplate", Utils.ConfigTemplate.DoNothing, LocalizationManager.GetLangValue("configTemplate.description"));
+            isShortcutsEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isShortcutsEnable.label"), "isShortcutsEnable", false, LocalizationManager.GetLangValue("isShortcutsEnable.description"));
+            isTimeGearEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isTimeGearEnable.label"), "isTimeGearEnable", false, LocalizationManager.GetLangValue("isTimeGearEnable.description"));
+            timeGear = config.Bind(LocalizationManager.GetEnUSLangValue("timeGear.label"), "timeGear", 0f, new ConfigDescription(LocalizationManager.GetLangValue("timeGear.description"), new AcceptableValueRange<float>(-32, 32)));
+            isShowFPSEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isShowFPSEnable.label"), "isShowFPSEnable", false, LocalizationManager.GetLangValue("isShowFPSEnable.description"));
+            targetFrameRate = config.Bind(LocalizationManager.GetEnUSLangValue("targetFrameRate.label"), "targetFrameRate", -1, new ConfigDescription(LocalizationManager.GetLangValue("targetFrameRate.description"), new AcceptableValueRange<int>(-1, 2333)));
+            isModSettingsButtonShow = config.Bind(LocalizationManager.GetEnUSLangValue("isModSettingsButtonShow.label"), "isModSettingsButtonShow", true, LocalizationManager.GetLangValue("isModSettingsButtonShow.description"));
+            isStoreEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isStoreEnable.label"), "isStoreEnable", false, new ConfigDescription(LocalizationManager.GetLangValue("isStoreEnable.description"), null, new object[] { "Advanced" }));
 
-            isIGMMessageShow = config.Bind(LocalizationManager.GetLangValue("isIGMMessageShow.label"), LocalizationManager.GetLangValue("isIGMMessageShow.name"), true, LocalizationManager.GetLangValue("isIGMMessageShow.description"));
-            isAlertPopupShow = config.Bind(LocalizationManager.GetLangValue("isAlertPopupShow.label"), LocalizationManager.GetLangValue("isAlertPopupShow.name"), true, LocalizationManager.GetLangValue("isAlertPopupShow.description"));
-            responseAlertPopup = config.Bind(LocalizationManager.GetLangValue("responseAlertPopup.label"), LocalizationManager.GetLangValue("responseAlertPopup.name"), Utils.AlertPopupResponse.DONOTHING, LocalizationManager.GetLangValue("responseAlertPopup.description"));
-            isOnApplicationFocus = config.Bind(LocalizationManager.GetLangValue("isOnApplicationFocus.label"), LocalizationManager.GetLangValue("isOnApplicationFocus.name"), true, LocalizationManager.GetLangValue("isOnApplicationFocus.description"));
-            isRewardToastShow = config.Bind(LocalizationManager.GetLangValue("isRewardToastShow.label"), LocalizationManager.GetLangValue("isRewardToastShow.name"), true, LocalizationManager.GetLangValue("isRewardToastShow.description"));
-            isAutoOpenBoxesRewardEnable = config.Bind(LocalizationManager.GetLangValue("isAutoOpenBoxesRewardEnable.label"), LocalizationManager.GetLangValue("isAutoOpenBoxesRewardEnable.name"), false, LocalizationManager.GetLangValue("isAutoOpenBoxesRewardEnable.description"));
-            isAutoExit = config.Bind(LocalizationManager.GetLangValue("isAutoExit.label"), LocalizationManager.GetLangValue("isAutoExit.name"), false, LocalizationManager.GetLangValue("isAutoExit.description"));
+            isIGMMessageShow = config.Bind(LocalizationManager.GetEnUSLangValue("isIGMMessageShow.label"), "isIGMMessageShow", true, LocalizationManager.GetLangValue("isIGMMessageShow.description"));
+            isAlertPopupShow = config.Bind(LocalizationManager.GetEnUSLangValue("isAlertPopupShow.label"), "isAlertPopupShow", true, LocalizationManager.GetLangValue("isAlertPopupShow.description"));
+            responseAlertPopup = config.Bind(LocalizationManager.GetEnUSLangValue("responseAlertPopup.label"), "responseAlertPopup", Utils.AlertPopupResponse.DONOTHING, LocalizationManager.GetLangValue("responseAlertPopup.description"));
+            isOnApplicationFocus = config.Bind(LocalizationManager.GetEnUSLangValue("isOnApplicationFocus.label"), "isOnApplicationFocus", true, LocalizationManager.GetLangValue("isOnApplicationFocus.description"));
+            isRewardToastShow = config.Bind(LocalizationManager.GetEnUSLangValue("isRewardToastShow.label"), "isRewardToastShow", true, LocalizationManager.GetLangValue("isRewardToastShow.description"));
+            isAutoOpenBoxesRewardEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isAutoOpenBoxesRewardEnable.label"), "isAutoOpenBoxesRewardEnable", false, LocalizationManager.GetLangValue("isAutoOpenBoxesRewardEnable.description"));
+            isAutoExit = config.Bind(LocalizationManager.GetEnUSLangValue("isAutoExit.label"), "isAutoExit", false, LocalizationManager.GetLangValue("isAutoExit.description"));
             //isAutoRestart = config.Bind(LocalizationManager.GetLangValue("//isAutoRestart.label"), LocalizationManager.GetLangValue("//isAutoRestart.name"), false, LocalizationManager.GetLangValue("//isAutoRestart.description"));
-            isShowCardLargeCount = config.Bind(LocalizationManager.GetLangValue("isShowCardLargeCount.label"), LocalizationManager.GetLangValue("isShowCardLargeCount.name"), false, LocalizationManager.GetLangValue("isShowCardLargeCount.description"));
-            isShowCollectionCardIdEnable = config.Bind(LocalizationManager.GetLangValue("isShowCollectionCardIdEnable.label"), LocalizationManager.GetLangValue("isShowCollectionCardIdEnable.name"), false, LocalizationManager.GetLangValue("isShowCollectionCardIdEnable.description"));
-            isBypassDeckShareCodeCheckEnable = config.Bind(LocalizationManager.GetLangValue("isBypassDeckShareCodeCheckEnable.label"), LocalizationManager.GetLangValue("isBypassDeckShareCodeCheckEnable.name"), false, LocalizationManager.GetLangValue("isBypassDeckShareCodeCheckEnable.description"));
-            isShowRetireForever = config.Bind(LocalizationManager.GetLangValue("isShowRetireForever.label"), LocalizationManager.GetLangValue("isShowRetireForever.name"), false, LocalizationManager.GetLangValue("isShowRetireForever.description"));
-            isIdleKickEnable = config.Bind(LocalizationManager.GetLangValue("isIdleKickEnable.label"), LocalizationManager.GetLangValue("isIdleKickEnable.name"), true, LocalizationManager.GetLangValue("isIdleKickEnable.description"));
+            isShowCardLargeCount = config.Bind(LocalizationManager.GetEnUSLangValue("isShowCardLargeCount.label"), "isShowCardLargeCount", false, LocalizationManager.GetLangValue("isShowCardLargeCount.description"));
+            isShowCollectionCardIdEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isShowCollectionCardIdEnable.label"), "isShowCollectionCardIdEnable", false, LocalizationManager.GetLangValue("isShowCollectionCardIdEnable.description"));
+            isBypassDeckShareCodeCheckEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBypassDeckShareCodeCheckEnable.label"), "isBypassDeckShareCodeCheckEnable", false, LocalizationManager.GetLangValue("isBypassDeckShareCodeCheckEnable.description"));
+            isShowRetireForever = config.Bind(LocalizationManager.GetEnUSLangValue("isShowRetireForever.label"), "isShowRetireForever", false, LocalizationManager.GetLangValue("isShowRetireForever.description"));
+            isIdleKickEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isIdleKickEnable.label"), "isIdleKickEnable", true, LocalizationManager.GetLangValue("isIdleKickEnable.description"));
 
 
-            isQuickPackOpeningEnable = config.Bind(LocalizationManager.GetLangValue("isQuickPackOpeningEnable.label"), LocalizationManager.GetLangValue("isQuickPackOpeningEnable.name"), false, LocalizationManager.GetLangValue("isQuickPackOpeningEnable.description"));
-            isAutoPackOpeningEnable = config.Bind(LocalizationManager.GetLangValue("isAutoPackOpeningEnable.label"), LocalizationManager.GetLangValue("isAutoPackOpeningEnable.name"), false, LocalizationManager.GetLangValue("isAutoPackOpeningEnable.description"));
-            isAutoRefundCardDisenchantEnable = config.Bind(LocalizationManager.GetLangValue("isAutoRefundCardDisenchantEnable.label"), LocalizationManager.GetLangValue("isAutoRefundCardDisenchantEnable.name"), false, LocalizationManager.GetLangValue("isAutoRefundCardDisenchantEnable.description"));
+            isQuickPackOpeningEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isQuickPackOpeningEnable.label"), "isQuickPackOpeningEnable", false, LocalizationManager.GetLangValue("isQuickPackOpeningEnable.description"));
+            isAutoPackOpeningEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isAutoPackOpeningEnable.label"), "isAutoPackOpeningEnable", false, LocalizationManager.GetLangValue("isAutoPackOpeningEnable.description"));
+            isAutoRefundCardDisenchantEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isAutoRefundCardDisenchantEnable.label"), "isAutoRefundCardDisenchantEnable", false, LocalizationManager.GetLangValue("isAutoRefundCardDisenchantEnable.description"));
 
-            isAutoReportEnable = config.Bind(LocalizationManager.GetLangValue("isAutoReportEnable.label"), LocalizationManager.GetLangValue("isAutoReportEnable.name"), false, LocalizationManager.GetLangValue("isAutoReportEnable.description"));
+            isAutoReportEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isAutoReportEnable.label"), "isAutoReportEnable", false, LocalizationManager.GetLangValue("isAutoReportEnable.description"));
             // isAutoReportEnable = config.Bind(LocalizationManager.GetLangValue("// isAutoReportEnable.label"), LocalizationManager.GetLangValue("// isAutoReportEnable.name"), true, new ConfigDescription(LocalizationManager.GetLangValue("// isAutoReportEnable.description"), null, new object[] { "Advanced" }));
-            isMoveEnemyCardsEnable = config.Bind(LocalizationManager.GetLangValue("isMoveEnemyCardsEnable.label"), LocalizationManager.GetLangValue("isMoveEnemyCardsEnable.name"), false, LocalizationManager.GetLangValue("isMoveEnemyCardsEnable.description"));
+            isMoveEnemyCardsEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isMoveEnemyCardsEnable.label"), "isMoveEnemyCardsEnable", false, LocalizationManager.GetLangValue("isMoveEnemyCardsEnable.description"));
 
 
-            isQuickModeEnable = config.Bind(LocalizationManager.GetLangValue("isQuickModeEnable.label"), LocalizationManager.GetLangValue("isQuickModeEnable.name"), false, LocalizationManager.GetLangValue("isQuickModeEnable.description"));
-            isFullnameShow = config.Bind(LocalizationManager.GetLangValue("isFullnameShow.label"), LocalizationManager.GetLangValue("isFullnameShow.name"), false, LocalizationManager.GetLangValue("isFullnameShow.description"));
-            isBlockStreamerMode = config.Bind(LocalizationManager.GetLangValue("isBlockStreamerMode.label"), LocalizationManager.GetLangValue("isBlockStreamerMode.name"), false, LocalizationManager.GetLangValue("isBlockStreamerMode.description"));
-            isOpponentRankInGameShow = config.Bind(LocalizationManager.GetLangValue("isOpponentRankInGameShow.label"), LocalizationManager.GetLangValue("isOpponentRankInGameShow.name"), false, LocalizationManager.GetLangValue("isOpponentRankInGameShow.description"));
-            isCardTrackerEnable = config.Bind(LocalizationManager.GetLangValue("isCardTrackerEnable.label"), LocalizationManager.GetLangValue("isCardTrackerEnable.name"), false, LocalizationManager.GetLangValue("isCardTrackerEnable.description"));
-            isCardRevealedEnable = config.Bind(LocalizationManager.GetLangValue("isCardRevealedEnable.label"), LocalizationManager.GetLangValue("isCardRevealedEnable.name"), false, LocalizationManager.GetLangValue("isCardRevealedEnable.description"));
-            isSkipHeroIntro = config.Bind(LocalizationManager.GetLangValue("isSkipHeroIntro.label"), LocalizationManager.GetLangValue("isSkipHeroIntro.name"), false, LocalizationManager.GetLangValue("isSkipHeroIntro.description"));
-            isExtendedBMEnable = config.Bind(LocalizationManager.GetLangValue("isExtendedBMEnable.label"), LocalizationManager.GetLangValue("isExtendedBMEnable.name"), false, LocalizationManager.GetLangValue("isExtendedBMEnable.description"));
-            isThinkEmotesEnable = config.Bind(LocalizationManager.GetLangValue("isThinkEmotesEnable.label"), LocalizationManager.GetLangValue("isThinkEmotesEnable.name"), true, LocalizationManager.GetLangValue("isThinkEmotesEnable.description"));
-            receiveEnemyEmoteLimit = config.Bind(LocalizationManager.GetLangValue("receiveEnemyEmoteLimit.label"), LocalizationManager.GetLangValue("receiveEnemyEmoteLimit.name"), -1, new ConfigDescription(LocalizationManager.GetLangValue("receiveEnemyEmoteLimit.description"), new AcceptableValueRange<int>(-1, 100)));
-            isOpponentGoldenCardShow = config.Bind(LocalizationManager.GetLangValue("isOpponentGoldenCardShow.label"), LocalizationManager.GetLangValue("isOpponentGoldenCardShow.name"), true, LocalizationManager.GetLangValue("isOpponentGoldenCardShow.description"));
-            isSignatureCardStateEnable = config.Bind(LocalizationManager.GetLangValue("isSignatureCardStateEnable.label"), LocalizationManager.GetLangValue("isSignatureCardStateEnable.name"), true, LocalizationManager.GetLangValue("isSignatureCardStateEnable.description"));
-            signatureFirst = config.Bind(LocalizationManager.GetLangValue("signatureFirst.label"), LocalizationManager.GetLangValue("signatureFirst.name"), false, LocalizationManager.GetLangValue("signatureFirst.description"));
-            previewCardPlaySounds = config.Bind(LocalizationManager.GetLangValue("previewCardPlaySounds.label"), LocalizationManager.GetLangValue("previewCardPlaySounds.name"), true, LocalizationManager.GetLangValue("previewCardPlaySounds.description"));
-            checkCollDeckValidForMode = config.Bind(LocalizationManager.GetLangValue("checkCollDeckValidForMode.label"), LocalizationManager.GetLangValue("checkCollDeckValidForMode.name"), false, LocalizationManager.GetLangValue("checkCollDeckValidForMode.description"));
-            oldSignatureSave = config.Bind(LocalizationManager.GetLangValue("oldSignatureSave.label"), LocalizationManager.GetLangValue("oldSignatureSave.name"), true, LocalizationManager.GetLangValue("oldSignatureSave.description"));
-            goldenCardState = config.Bind(LocalizationManager.GetLangValue("goldenCardState.label"), LocalizationManager.GetLangValue("goldenCardState.name"), Utils.CardState.Default, LocalizationManager.GetLangValue("goldenCardState.description"));
-            maxCardState = config.Bind(LocalizationManager.GetLangValue("maxCardState.label"), LocalizationManager.GetLangValue("maxCardState.name"), Utils.CardState.Default, LocalizationManager.GetLangValue("maxCardState.description"));
+            isQuickModeEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isQuickModeEnable.label"), "isQuickModeEnable", false, LocalizationManager.GetLangValue("isQuickModeEnable.description"));
+            isFullnameShow = config.Bind(LocalizationManager.GetEnUSLangValue("isFullnameShow.label"), "isFullnameShow", false, LocalizationManager.GetLangValue("isFullnameShow.description"));
+            isBlockStreamerMode = config.Bind(LocalizationManager.GetEnUSLangValue("isBlockStreamerMode.label"), "isBlockStreamerMode", false, LocalizationManager.GetLangValue("isBlockStreamerMode.description"));
+            isOpponentRankInGameShow = config.Bind(LocalizationManager.GetEnUSLangValue("isOpponentRankInGameShow.label"), "isOpponentRankInGameShow", false, LocalizationManager.GetLangValue("isOpponentRankInGameShow.description"));
+            isCardTrackerEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isCardTrackerEnable.label"), "isCardTrackerEnable", false, LocalizationManager.GetLangValue("isCardTrackerEnable.description"));
+            isCardRevealedEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isCardRevealedEnable.label"), "isCardRevealedEnable", false, LocalizationManager.GetLangValue("isCardRevealedEnable.description"));
+            isSkipHeroIntro = config.Bind(LocalizationManager.GetEnUSLangValue("isSkipHeroIntro.label"), "isSkipHeroIntro", false, LocalizationManager.GetLangValue("isSkipHeroIntro.description"));
+            isExtendedBMEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isExtendedBMEnable.label"), "isExtendedBMEnable", false, LocalizationManager.GetLangValue("isExtendedBMEnable.description"));
+            isThinkEmotesEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isThinkEmotesEnable.label"), "isThinkEmotesEnable", true, LocalizationManager.GetLangValue("isThinkEmotesEnable.description"));
+            receiveEnemyEmoteLimit = config.Bind(LocalizationManager.GetEnUSLangValue("receiveEnemyEmoteLimit.label"), "receiveEnemyEmoteLimit", -1, new ConfigDescription(LocalizationManager.GetLangValue("receiveEnemyEmoteLimit.description"), new AcceptableValueRange<int>(-1, 100)));
+            isOpponentGoldenCardShow = config.Bind(LocalizationManager.GetEnUSLangValue("isOpponentGoldenCardShow.label"), "isOpponentGoldenCardShow", true, LocalizationManager.GetLangValue("isOpponentGoldenCardShow.description"));
+            isSignatureCardStateEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isSignatureCardStateEnable.label"), "isSignatureCardStateEnable", true, LocalizationManager.GetLangValue("isSignatureCardStateEnable.description"));
+            signatureFirst = config.Bind(LocalizationManager.GetEnUSLangValue("signatureFirst.label"), "signatureFirst", false, LocalizationManager.GetLangValue("signatureFirst.description"));
+            previewCardPlaySounds = config.Bind(LocalizationManager.GetEnUSLangValue("previewCardPlaySounds.label"), "previewCardPlaySounds", true, LocalizationManager.GetLangValue("previewCardPlaySounds.description"));
+            checkCollDeckValidForMode = config.Bind(LocalizationManager.GetEnUSLangValue("checkCollDeckValidForMode.label"), "checkCollDeckValidForMode", false, LocalizationManager.GetLangValue("checkCollDeckValidForMode.description"));
+            oldSignatureSave = config.Bind(LocalizationManager.GetEnUSLangValue("oldSignatureSave.label"), "oldSignatureSave", true, LocalizationManager.GetLangValue("oldSignatureSave.description"));
+            goldenCardState = config.Bind(LocalizationManager.GetEnUSLangValue("goldenCardState.label"), "goldenCardState", Utils.CardState.Default, LocalizationManager.GetLangValue("goldenCardState.description"));
+            maxCardState = config.Bind(LocalizationManager.GetEnUSLangValue("maxCardState.label"), "maxCardState", Utils.CardState.Default, LocalizationManager.GetLangValue("maxCardState.description"));
 
-            isAutoRecvMercenaryRewardEnable = config.Bind(LocalizationManager.GetLangValue("isAutoRecvMercenaryRewardEnable.label"), LocalizationManager.GetLangValue("isAutoRecvMercenaryRewardEnable.name"), false, LocalizationManager.GetLangValue("isAutoRecvMercenaryRewardEnable.description"));
-            isMercenaryBattleZoom = config.Bind(LocalizationManager.GetLangValue("isMercenaryBattleZoom.label"), LocalizationManager.GetLangValue("isMercenaryBattleZoom.name"), true, LocalizationManager.GetLangValue("isMercenaryBattleZoom.description"));
-            mercenaryDiamondCardState = config.Bind(LocalizationManager.GetLangValue("mercenaryDiamondCardState.label"), LocalizationManager.GetLangValue("mercenaryDiamondCardState.name"), Utils.CardState.Default, LocalizationManager.GetLangValue("mercenaryDiamondCardState.description"));
-            randomMercenarySkinEnable = config.Bind(LocalizationManager.GetLangValue("randomMercenarySkinEnable.label"), LocalizationManager.GetLangValue("randomMercenarySkinEnable.name"), Utils.CardState.Default, LocalizationManager.GetLangValue("randomMercenarySkinEnable.description"));
+            isAutoRecvMercenaryRewardEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isAutoRecvMercenaryRewardEnable.label"), "isAutoRecvMercenaryRewardEnable", false, LocalizationManager.GetLangValue("isAutoRecvMercenaryRewardEnable.description"));
+            isMercenaryBattleZoom = config.Bind(LocalizationManager.GetEnUSLangValue("isMercenaryBattleZoom.label"), "isMercenaryBattleZoom", true, LocalizationManager.GetLangValue("isMercenaryBattleZoom.description"));
+            mercenaryDiamondCardState = config.Bind(LocalizationManager.GetEnUSLangValue("mercenaryDiamondCardState.label"), "mercenaryDiamondCardState", Utils.CardState.Default, LocalizationManager.GetLangValue("mercenaryDiamondCardState.description"));
+            randomMercenarySkinEnable = config.Bind(LocalizationManager.GetEnUSLangValue("randomMercenarySkinEnable.label"), "randomMercenarySkinEnable", Utils.CardState.Default, LocalizationManager.GetLangValue("randomMercenarySkinEnable.description"));
 
-            isShutUpBobEnable = config.Bind(LocalizationManager.GetLangValue("isShutUpBobEnable.label"), LocalizationManager.GetLangValue("isShutUpBobEnable.name"), false, LocalizationManager.GetLangValue("isShutUpBobEnable.description"));
-            isBgsGoldenEnable = config.Bind(LocalizationManager.GetLangValue("isBgsGoldenEnable.label"), LocalizationManager.GetLangValue("isBgsGoldenEnable.name"), false, LocalizationManager.GetLangValue("isBgsGoldenEnable.description"));
-            isBgsSeasonTicketUnlock = config.Bind(LocalizationManager.GetLangValue("isBgsSeasonTicketUnlock.label"), LocalizationManager.GetLangValue("isBgsSeasonTicketUnlock.name"), false, LocalizationManager.GetLangValue("isBgsSeasonTicketUnlock.description"));
-            isBgsUnlockCollectionEnable = config.Bind(LocalizationManager.GetLangValue("isBgsUnlockCollectionEnable.label"), LocalizationManager.GetLangValue("isBgsUnlockCollectionEnable.name"), false, LocalizationManager.GetLangValue("isBgsUnlockCollectionEnable.description"));
-            isBgRankEnable = config.Bind(LocalizationManager.GetLangValue("isBgRankEnable.label"), LocalizationManager.GetLangValue("isBgRankEnable.name"), true, LocalizationManager.GetLangValue("isBgRankEnable.description"));
-            isBgSessionStatsEnable = config.Bind(LocalizationManager.GetLangValue("isBgSessionStatsEnable.label"), LocalizationManager.GetLangValue("isBgSessionStatsEnable.name"), true, LocalizationManager.GetLangValue("isBgSessionStatsEnable.description"));
-            isBgAutoSquelchEnable = config.Bind(LocalizationManager.GetLangValue("isBgAutoSquelchEnable.label"), LocalizationManager.GetLangValue("isBgAutoSquelchEnable.name"), false, LocalizationManager.GetLangValue("isBgAutoSquelchEnable.description"));
-            isPatchAssetLoader = config.Bind(LocalizationManager.GetLangValue("isPatchAssetLoader.label"), LocalizationManager.GetLangValue("isPatchAssetLoader.name"), false, LocalizationManager.GetLangValue("isPatchAssetLoader.description"));
-            shieldMainBoxLuckyDraw = config.Bind(LocalizationManager.GetLangValue("shieldMainBoxLuckyDraw.label"), LocalizationManager.GetLangValue("shieldMainBoxLuckyDraw.name"), false, LocalizationManager.GetLangValue("shieldMainBoxLuckyDraw.description"));
-            SaveCardTextures = config.Bind(LocalizationManager.GetLangValue("SaveCardTextures.label"), LocalizationManager.GetLangValue("SaveCardTextures.name"), false, LocalizationManager.GetLangValue("SaveCardTextures.description"));
+            isShutUpBobEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isShutUpBobEnable.label"), "isShutUpBobEnable", false, LocalizationManager.GetLangValue("isShutUpBobEnable.description"));
+            isBgsGoldenEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgsGoldenEnable.label"), "isBgsGoldenEnable", false, LocalizationManager.GetLangValue("isBgsGoldenEnable.description"));
+            isBgsSeasonTicketUnlock = config.Bind(LocalizationManager.GetEnUSLangValue("isBgsSeasonTicketUnlock.label"), "isBgsSeasonTicketUnlock", false, LocalizationManager.GetLangValue("isBgsSeasonTicketUnlock.description"));
+            isBgsUnlockCollectionEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgsUnlockCollectionEnable.label"), "isBgsUnlockCollectionEnable", false, LocalizationManager.GetLangValue("isBgsUnlockCollectionEnable.description"));
+            isBgRankEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgRankEnable.label"), "isBgRankEnable", true, LocalizationManager.GetLangValue("isBgRankEnable.description"));
+            isBgSessionStatsEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgSessionStatsEnable.label"), "isBgSessionStatsEnable", true, LocalizationManager.GetLangValue("isBgSessionStatsEnable.description"));
+            isBgAutoSquelchEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgAutoSquelchEnable.label"), "isBgAutoSquelchEnable", false, LocalizationManager.GetLangValue("isBgAutoSquelchEnable.description"));
+            isPatchAssetLoader = config.Bind(LocalizationManager.GetEnUSLangValue("isPatchAssetLoader.label"), "isPatchAssetLoader", false, LocalizationManager.GetLangValue("isPatchAssetLoader.description"));
+            shieldMainBoxLuckyDraw = config.Bind(LocalizationManager.GetEnUSLangValue("shieldMainBoxLuckyDraw.label"), "shieldMainBoxLuckyDraw", false, LocalizationManager.GetLangValue("shieldMainBoxLuckyDraw.description"));
+            SaveCardTextures = config.Bind(LocalizationManager.GetEnUSLangValue("SaveCardTextures.label"), "SaveCardTextures", false, LocalizationManager.GetLangValue("SaveCardTextures.description"));
             //考虑导出单独配置
-            skinCoin = config.Bind(LocalizationManager.GetLangValue("skinCoin.label"), LocalizationManager.GetLangValue("skinCoin.name"), -1, LocalizationManager.GetLangValue("skinCoin.description"));
-            skinCardBack = config.Bind(LocalizationManager.GetLangValue("skinCardBack.label"), LocalizationManager.GetLangValue("skinCardBack.name"), -1, LocalizationManager.GetLangValue("skinCardBack.description"));
-            skinBoard = config.Bind(LocalizationManager.GetLangValue("skinBoard.label"), LocalizationManager.GetLangValue("skinBoard.name"), -1, LocalizationManager.GetLangValue("skinBoard.description"));
-            skinBgsBoard = config.Bind(LocalizationManager.GetLangValue("skinBgsBoard.label"), LocalizationManager.GetLangValue("skinBgsBoard.name"), -1, LocalizationManager.GetLangValue("skinBgsBoard.description"));
-            skinBgsFinisher = config.Bind(LocalizationManager.GetLangValue("skinBgsFinisher.label"), LocalizationManager.GetLangValue("skinBgsFinisher.name"), -1, LocalizationManager.GetLangValue("skinBgsFinisher.description"));
-            skinBob = config.Bind(LocalizationManager.GetLangValue("skinBob.label"), LocalizationManager.GetLangValue("skinBob.name"), -1, LocalizationManager.GetLangValue("skinBob.description"));
-            isFakePet = config.Bind(LocalizationManager.GetLangValue("isFakePet.label"), LocalizationManager.GetLangValue("isFakePet.name"), false, LocalizationManager.GetLangValue("isFakePet.description"));
-            skinPet = config.Bind(LocalizationManager.GetLangValue("skinPet.label"), LocalizationManager.GetLangValue("skinPet.name"), -1, LocalizationManager.GetLangValue("skinPet.description"));
-            skinOpposingPet = config.Bind(LocalizationManager.GetLangValue("skinOpposingPet.label"), LocalizationManager.GetLangValue("skinOpposingPet.name"), -1, LocalizationManager.GetLangValue("skinOpposingPet.description"));
-            isSkinDefalutHeroEnable = config.Bind(LocalizationManager.GetLangValue("isSkinDefalutHeroEnable.label"), LocalizationManager.GetLangValue("isSkinDefalutHeroEnable.name"), false, LocalizationManager.GetLangValue("isSkinDefalutHeroEnable.description"));
-            skinHero = config.Bind(LocalizationManager.GetLangValue("skinHero.label"), LocalizationManager.GetLangValue("skinHero.name"), -1, LocalizationManager.GetLangValue("skinHero.description"));
-            skinOpposingHero = config.Bind(LocalizationManager.GetLangValue("skinOpposingHero.label"), LocalizationManager.GetLangValue("skinOpposingHero.name"), -1, LocalizationManager.GetLangValue("skinOpposingHero.description"));
+            skinCoin = config.Bind(LocalizationManager.GetEnUSLangValue("skinCoin.label"), "skinCoin", -1, LocalizationManager.GetLangValue("skinCoin.description"));
+            skinCardBack = config.Bind(LocalizationManager.GetEnUSLangValue("skinCardBack.label"), "skinCardBack", -1, LocalizationManager.GetLangValue("skinCardBack.description"));
+            skinBoard = config.Bind(LocalizationManager.GetEnUSLangValue("skinBoard.label"), "skinBoard", -1, LocalizationManager.GetLangValue("skinBoard.description"));
+            skinBgsBoard = config.Bind(LocalizationManager.GetEnUSLangValue("skinBgsBoard.label"), "skinBgsBoard", -1, LocalizationManager.GetLangValue("skinBgsBoard.description"));
+            skinBgsFinisher = config.Bind(LocalizationManager.GetEnUSLangValue("skinBgsFinisher.label"), "skinBgsFinisher", -1, LocalizationManager.GetLangValue("skinBgsFinisher.description"));
+            skinBob = config.Bind(LocalizationManager.GetEnUSLangValue("skinBob.label"), "skinBob", -1, LocalizationManager.GetLangValue("skinBob.description"));
+            isFakePet = config.Bind(LocalizationManager.GetEnUSLangValue("isFakePet.label"), "isFakePet", false, LocalizationManager.GetLangValue("isFakePet.description"));
+            skinPet = config.Bind(LocalizationManager.GetEnUSLangValue("skinPet.label"), "skinPet", -1, LocalizationManager.GetLangValue("skinPet.description"));
+            skinOpposingPet = config.Bind(LocalizationManager.GetEnUSLangValue("skinOpposingPet.label"), "skinOpposingPet", -1, LocalizationManager.GetLangValue("skinOpposingPet.description"));
+            isSkinDefalutHeroEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isSkinDefalutHeroEnable.label"), "isSkinDefalutHeroEnable", false, LocalizationManager.GetLangValue("isSkinDefalutHeroEnable.description"));
+            skinHero = config.Bind(LocalizationManager.GetEnUSLangValue("skinHero.label"), "skinHero", -1, LocalizationManager.GetLangValue("skinHero.description"));
+            skinOpposingHero = config.Bind(LocalizationManager.GetEnUSLangValue("skinOpposingHero.label"), "skinOpposingHero", -1, LocalizationManager.GetLangValue("skinOpposingHero.description"));
 
-            keyTimeGearUp = config.Bind(LocalizationManager.GetLangValue("keyTimeGearUp.label"), LocalizationManager.GetLangValue("keyTimeGearUp.name"), new KeyboardShortcut(KeyCode.UpArrow), LocalizationManager.GetLangValue("keyTimeGearUp.description"));
-            keyTimeGearDown = config.Bind(LocalizationManager.GetLangValue("keyTimeGearDown.label"), LocalizationManager.GetLangValue("keyTimeGearDown.name"), new KeyboardShortcut(KeyCode.DownArrow), LocalizationManager.GetLangValue("keyTimeGearDown.description"));
-            keyTimeGearDefault = config.Bind(LocalizationManager.GetLangValue("keyTimeGearDefault.label"), LocalizationManager.GetLangValue("keyTimeGearDefault.name"), new KeyboardShortcut(KeyCode.LeftArrow), LocalizationManager.GetLangValue("keyTimeGearDefault.description"));
-            keyTimeGearMax = config.Bind(LocalizationManager.GetLangValue("keyTimeGearMax.label"), LocalizationManager.GetLangValue("keyTimeGearMax.name"), new KeyboardShortcut(KeyCode.RightArrow), LocalizationManager.GetLangValue("keyTimeGearMax.description"));
-            keySimulateDisconnect = config.Bind(LocalizationManager.GetLangValue("keySimulateDisconnect.label"), LocalizationManager.GetLangValue("keySimulateDisconnect.name"), new KeyboardShortcut(KeyCode.D, KeyCode.LeftControl), LocalizationManager.GetLangValue("keySimulateDisconnect.description"));
-            keyCopyBattleTag = config.Bind(LocalizationManager.GetLangValue("keyCopyBattleTag.label"), LocalizationManager.GetLangValue("keyCopyBattleTag.name"), new KeyboardShortcut(KeyCode.C, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyCopyBattleTag.description"));
-            keyCopySelectBattleTag = config.Bind(LocalizationManager.GetLangValue("keyCopySelectBattleTag.label"), LocalizationManager.GetLangValue("keyCopySelectBattleTag.name"), new KeyboardShortcut(KeyCode.Mouse0), LocalizationManager.GetLangValue("keyCopySelectBattleTag.description"));
-            keyConcede = config.Bind(LocalizationManager.GetLangValue("keyConcede.label"), LocalizationManager.GetLangValue("keyConcede.name"), new KeyboardShortcut(KeyCode.Space, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyConcede.description"));
-            keyContinueMulligan = config.Bind(LocalizationManager.GetLangValue("keyContinueMulligan.label"), LocalizationManager.GetLangValue("keyContinueMulligan.name"), new KeyboardShortcut(KeyCode.Space), LocalizationManager.GetLangValue("keyContinueMulligan.description"));
-            keySquelch = config.Bind(LocalizationManager.GetLangValue("keySquelch.label"), LocalizationManager.GetLangValue("keySquelch.name"), new KeyboardShortcut(KeyCode.Q, KeyCode.LeftControl), LocalizationManager.GetLangValue("keySquelch.description"));
-            keySoundMute = config.Bind(LocalizationManager.GetLangValue("keySoundMute.label"), LocalizationManager.GetLangValue("keySoundMute.name"), new KeyboardShortcut(KeyCode.S, KeyCode.LeftControl), LocalizationManager.GetLangValue("keySoundMute.description"));
-            keyShutUpBob = config.Bind(LocalizationManager.GetLangValue("keyShutUpBob.label"), LocalizationManager.GetLangValue("keyShutUpBob.name"), new KeyboardShortcut(KeyCode.B, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyShutUpBob.description"));
-            keyRefund = config.Bind(LocalizationManager.GetLangValue("keyRefund.label"), LocalizationManager.GetLangValue("keyRefund.name"), new KeyboardShortcut(KeyCode.Z, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyRefund.description"));
-            keyZeroDollarShopping = config.Bind(LocalizationManager.GetLangValue("keyZeroDollarShopping.label"), LocalizationManager.GetLangValue("keyZeroDollarShopping.name"), new KeyboardShortcut(KeyCode.Alpha0), LocalizationManager.GetLangValue("keyZeroDollarShopping.description"));
-            //keyRuin = config.Bind(LocalizationManager.GetLangValue("keyRuin.label"), LocalizationManager.GetLangValue("keyRuin.name"), new KeyboardShortcut(KeyCode.R, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyRuin.description"));
-            keyReadNewCards = config.Bind(LocalizationManager.GetLangValue("keyReadNewCards.label"), LocalizationManager.GetLangValue("keyReadNewCards.name"), new KeyboardShortcut(KeyCode.R, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyReadNewCards.description"));
-            keyShowFPS = config.Bind(LocalizationManager.GetLangValue("keyShowFPS.label"), LocalizationManager.GetLangValue("keyShowFPS.name"), new KeyboardShortcut(KeyCode.P, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyShowFPS.description"));
+            keyTimeGearUp = config.Bind(LocalizationManager.GetEnUSLangValue("keyTimeGearUp.label"), "keyTimeGearUp", new KeyboardShortcut(KeyCode.UpArrow), LocalizationManager.GetLangValue("keyTimeGearUp.description"));
+            keyTimeGearDown = config.Bind(LocalizationManager.GetEnUSLangValue("keyTimeGearDown.label"), "keyTimeGearDown", new KeyboardShortcut(KeyCode.DownArrow), LocalizationManager.GetLangValue("keyTimeGearDown.description"));
+            keyTimeGearDefault = config.Bind(LocalizationManager.GetEnUSLangValue("keyTimeGearDefault.label"), "keyTimeGearDefault", new KeyboardShortcut(KeyCode.LeftArrow), LocalizationManager.GetLangValue("keyTimeGearDefault.description"));
+            keyTimeGearMax = config.Bind(LocalizationManager.GetEnUSLangValue("keyTimeGearMax.label"), "keyTimeGearMax", new KeyboardShortcut(KeyCode.RightArrow), LocalizationManager.GetLangValue("keyTimeGearMax.description"));
+            keySimulateDisconnect = config.Bind(LocalizationManager.GetEnUSLangValue("keySimulateDisconnect.label"), "keySimulateDisconnect", new KeyboardShortcut(KeyCode.D, KeyCode.LeftControl), LocalizationManager.GetLangValue("keySimulateDisconnect.description"));
+            keyCopyBattleTag = config.Bind(LocalizationManager.GetEnUSLangValue("keyCopyBattleTag.label"), "keyCopyBattleTag", new KeyboardShortcut(KeyCode.C, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyCopyBattleTag.description"));
+            keyCopySelectBattleTag = config.Bind(LocalizationManager.GetEnUSLangValue("keyCopySelectBattleTag.label"), "keyCopySelectBattleTag", new KeyboardShortcut(KeyCode.Mouse0), LocalizationManager.GetLangValue("keyCopySelectBattleTag.description"));
+            keyConcede = config.Bind(LocalizationManager.GetEnUSLangValue("keyConcede.label"), "keyConcede", new KeyboardShortcut(KeyCode.Space, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyConcede.description"));
+            keyContinueMulligan = config.Bind(LocalizationManager.GetEnUSLangValue("keyContinueMulligan.label"), "keyContinueMulligan", new KeyboardShortcut(KeyCode.Space), LocalizationManager.GetLangValue("keyContinueMulligan.description"));
+            keySquelch = config.Bind(LocalizationManager.GetEnUSLangValue("keySquelch.label"), "keySquelch", new KeyboardShortcut(KeyCode.Q, KeyCode.LeftControl), LocalizationManager.GetLangValue("keySquelch.description"));
+            keySoundMute = config.Bind(LocalizationManager.GetEnUSLangValue("keySoundMute.label"), "keySoundMute", new KeyboardShortcut(KeyCode.S, KeyCode.LeftControl), LocalizationManager.GetLangValue("keySoundMute.description"));
+            keyShutUpBob = config.Bind(LocalizationManager.GetEnUSLangValue("keyShutUpBob.label"), "keyShutUpBob", new KeyboardShortcut(KeyCode.B, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyShutUpBob.description"));
+            keyRefund = config.Bind(LocalizationManager.GetEnUSLangValue("keyRefund.label"), "keyRefund", new KeyboardShortcut(KeyCode.Z, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyRefund.description"));
+            keyZeroDollarShopping = config.Bind(LocalizationManager.GetEnUSLangValue("keyZeroDollarShopping.label"), "keyZeroDollarShopping", new KeyboardShortcut(KeyCode.Alpha0), LocalizationManager.GetLangValue("keyZeroDollarShopping.description"));
+            //keyRuin = config.Bind(LocalizationManager.GetEnUSLangValue("keyRuin.label"), "keyRuin", new KeyboardShortcut(KeyCode.R, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyRuin.description"));
+            keyReadNewCards = config.Bind(LocalizationManager.GetEnUSLangValue("keyReadNewCards.label"), "keyReadNewCards", new KeyboardShortcut(KeyCode.R, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyReadNewCards.description"));
+            keyShowFPS = config.Bind(LocalizationManager.GetEnUSLangValue("keyShowFPS.label"), "keyShowFPS", new KeyboardShortcut(KeyCode.P, KeyCode.LeftControl), LocalizationManager.GetLangValue("keyShowFPS.description"));
 
-            keyBgsRefresh = config.Bind(LocalizationManager.GetLangValue("keyBgsRefresh.label"), LocalizationManager.GetLangValue("keyBgsRefresh.name"), new KeyboardShortcut(KeyCode.R), LocalizationManager.GetLangValue("keyBgsRefresh.description"));
-            keyBgsFreeze = config.Bind(LocalizationManager.GetLangValue("keyBgsFreeze.label"), LocalizationManager.GetLangValue("keyBgsFreeze.name"), new KeyboardShortcut(KeyCode.F), LocalizationManager.GetLangValue("keyBgsFreeze.description"));
-            keyBgsUpgrade = config.Bind(LocalizationManager.GetLangValue("keyBgsUpgrade.label"), LocalizationManager.GetLangValue("keyBgsUpgrade.name"), new KeyboardShortcut(KeyCode.U), LocalizationManager.GetLangValue("keyBgsUpgrade.description"));
-            keyBgsHeroPower = config.Bind(LocalizationManager.GetLangValue("keyBgsHeroPower.label"), LocalizationManager.GetLangValue("keyBgsHeroPower.name"), new KeyboardShortcut(KeyCode.H), LocalizationManager.GetLangValue("keyBgsHeroPower.description"));
-            keyBgsTeammateBoard = config.Bind(LocalizationManager.GetLangValue("keyBgsTeammateBoard.label"), LocalizationManager.GetLangValue("keyBgsTeammateBoard.name"), new KeyboardShortcut(KeyCode.T), LocalizationManager.GetLangValue("keyBgsTeammateBoard.description"));
+            keyBgsRefresh = config.Bind(LocalizationManager.GetEnUSLangValue("keyBgsRefresh.label"), "keyBgsRefresh", new KeyboardShortcut(KeyCode.R), LocalizationManager.GetLangValue("keyBgsRefresh.description"));
+            keyBgsFreeze = config.Bind(LocalizationManager.GetEnUSLangValue("keyBgsFreeze.label"), "keyBgsFreeze", new KeyboardShortcut(KeyCode.F), LocalizationManager.GetLangValue("keyBgsFreeze.description"));
+            keyBgsUpgrade = config.Bind(LocalizationManager.GetEnUSLangValue("keyBgsUpgrade.label"), "keyBgsUpgrade", new KeyboardShortcut(KeyCode.U), LocalizationManager.GetLangValue("keyBgsUpgrade.description"));
+            keyBgsHeroPower = config.Bind(LocalizationManager.GetEnUSLangValue("keyBgsHeroPower.label"), "keyBgsHeroPower", new KeyboardShortcut(KeyCode.H), LocalizationManager.GetLangValue("keyBgsHeroPower.description"));
+            keyBgsTeammateBoard = config.Bind(LocalizationManager.GetEnUSLangValue("keyBgsTeammateBoard.label"), "keyBgsTeammateBoard", new KeyboardShortcut(KeyCode.T), LocalizationManager.GetLangValue("keyBgsTeammateBoard.description"));
 
-            keyEmoteGreetings = config.Bind(LocalizationManager.GetLangValue("keyEmoteGreetings.label"), LocalizationManager.GetLangValue("keyEmoteGreetings.name"), new KeyboardShortcut(KeyCode.Alpha1), LocalizationManager.GetLangValue("keyEmoteGreetings.description"));
-            keyEmoteWellPlayed = config.Bind(LocalizationManager.GetLangValue("keyEmoteWellPlayed.label"), LocalizationManager.GetLangValue("keyEmoteWellPlayed.name"), new KeyboardShortcut(KeyCode.Alpha2), LocalizationManager.GetLangValue("keyEmoteWellPlayed.description"));
-            keyEmoteThanks = config.Bind(LocalizationManager.GetLangValue("keyEmoteThanks.label"), LocalizationManager.GetLangValue("keyEmoteThanks.name"), new KeyboardShortcut(KeyCode.Alpha3), LocalizationManager.GetLangValue("keyEmoteThanks.description"));
-            keyEmoteWow = config.Bind(LocalizationManager.GetLangValue("keyEmoteWow.label"), LocalizationManager.GetLangValue("keyEmoteWow.name"), new KeyboardShortcut(KeyCode.Alpha4), LocalizationManager.GetLangValue("keyEmoteWow.description"));
-            keyEmoteOops = config.Bind(LocalizationManager.GetLangValue("keyEmoteOops.label"), LocalizationManager.GetLangValue("keyEmoteOops.name"), new KeyboardShortcut(KeyCode.Alpha5), LocalizationManager.GetLangValue("keyEmoteOops.description"));
-            keyEmoteThreaten = config.Bind(LocalizationManager.GetLangValue("keyEmoteThreaten.label"), LocalizationManager.GetLangValue("keyEmoteThreaten.name"), new KeyboardShortcut(KeyCode.Alpha6), LocalizationManager.GetLangValue("keyEmoteThreaten.description"));
+            keyEmoteGreetings = config.Bind(LocalizationManager.GetEnUSLangValue("keyEmoteGreetings.label"), "keyEmoteGreetings", new KeyboardShortcut(KeyCode.Alpha1), LocalizationManager.GetLangValue("keyEmoteGreetings.description"));
+            keyEmoteWellPlayed = config.Bind(LocalizationManager.GetEnUSLangValue("keyEmoteWellPlayed.label"), "keyEmoteWellPlayed", new KeyboardShortcut(KeyCode.Alpha2), LocalizationManager.GetLangValue("keyEmoteWellPlayed.description"));
+            keyEmoteThanks = config.Bind(LocalizationManager.GetEnUSLangValue("keyEmoteThanks.label"), "keyEmoteThanks", new KeyboardShortcut(KeyCode.Alpha3), LocalizationManager.GetLangValue("keyEmoteThanks.description"));
+            keyEmoteWow = config.Bind(LocalizationManager.GetEnUSLangValue("keyEmoteWow.label"), "keyEmoteWow", new KeyboardShortcut(KeyCode.Alpha4), LocalizationManager.GetLangValue("keyEmoteWow.description"));
+            keyEmoteOops = config.Bind(LocalizationManager.GetEnUSLangValue("keyEmoteOops.label"), "keyEmoteOops", new KeyboardShortcut(KeyCode.Alpha5), LocalizationManager.GetLangValue("keyEmoteOops.description"));
+            keyEmoteThreaten = config.Bind(LocalizationManager.GetEnUSLangValue("keyEmoteThreaten.label"), "keyEmoteThreaten", new KeyboardShortcut(KeyCode.Alpha6), LocalizationManager.GetLangValue("keyEmoteThreaten.description"));
 
-            hsLogPath = config.Bind(LocalizationManager.GetLangValue("hsLogPath.label"), LocalizationManager.GetLangValue("hsLogPath.name"), "", new ConfigDescription(LocalizationManager.GetLangValue("hsLogPath.description"), null, new object[] { "Advanced" }));
-            hsMatchLogPath = config.Bind(LocalizationManager.GetLangValue("hsMatchLogPath.label"), LocalizationManager.GetLangValue("hsMatchLogPath.name"), Path.Combine(BepInEx.Paths.BepInExRootPath, "HsMod", "match.log"), LocalizationManager.GetLangValue("hsMatchLogPath.description"));
-            autoQuitTimer = config.Bind(LocalizationManager.GetLangValue("autoQuitTimer.label"), LocalizationManager.GetLangValue("autoQuitTimer.name"), (long)0, LocalizationManager.GetLangValue("autoQuitTimer.description"));
-            autoRefershQuestTimer = config.Bind(LocalizationManager.GetLangValue("autoRefershQuestTimer.label"), LocalizationManager.GetLangValue("autoRefershQuestTimer.name"), (long)0, LocalizationManager.GetLangValue("autoRefershQuestTimer.description"));
-            isFakeOpenEnable = config.Bind(LocalizationManager.GetLangValue("isFakeOpenEnable.label"), LocalizationManager.GetLangValue("isFakeOpenEnable.name"), false, LocalizationManager.GetLangValue("isFakeOpenEnable.description"));
-            buyAdventure = config.Bind(LocalizationManager.GetLangValue("buyAdventure.label"), LocalizationManager.GetLangValue("buyAdventure.name"), Utils.BuyAdventureTemplate.DoNothing, LocalizationManager.GetLangValue("buyAdventure.description"));
-            isKarazhanFixEnable = config.Bind(LocalizationManager.GetLangValue("isKarazhanFixEnable.label"), LocalizationManager.GetLangValue("isKarazhanFixEnable.name"), false, LocalizationManager.GetLangValue("isKarazhanFixEnable.description"));
-            webServerPort = config.Bind(LocalizationManager.GetLangValue("webServerPort.label"), LocalizationManager.GetLangValue("webServerPort.name"), 58744, new ConfigDescription(LocalizationManager.GetLangValue("webServerPort.description"), new AcceptableValueRange<int>(1, 65535)));
-            webPageBackImg = config.Bind(LocalizationManager.GetLangValue("webPageBackImg.label"), LocalizationManager.GetLangValue("webPageBackImg.name"), "https://imgapi.cn/cos.php", new ConfigDescription(LocalizationManager.GetLangValue("webPageBackImg.description"), null, new object[] { "Advanced" }));
-            isWebshellEnable = config.Bind(LocalizationManager.GetLangValue("isWebshellEnable.label"), LocalizationManager.GetLangValue("isWebshellEnable.name"), false, LocalizationManager.GetLangValue("isWebshellEnable.description"));
-            isInternalModeEnable = config.Bind(LocalizationManager.GetLangValue("isInternalModeEnable.label"), LocalizationManager.GetLangValue("isInternalModeEnable.name"), false, LocalizationManager.GetLangValue("isInternalModeEnable.description"));
+            hsLogPath = config.Bind(LocalizationManager.GetEnUSLangValue("hsLogPath.label"), "hsLogPath", "", new ConfigDescription(LocalizationManager.GetLangValue("hsLogPath.description"), null, new object[] { "Advanced" }));
+            hsMatchLogPath = config.Bind(LocalizationManager.GetEnUSLangValue("hsMatchLogPath.label"), "hsMatchLogPath", Path.Combine(BepInEx.Paths.BepInExRootPath, "HsMod", "match.log"), LocalizationManager.GetLangValue("hsMatchLogPath.description"));
+            autoQuitTimer = config.Bind(LocalizationManager.GetEnUSLangValue("autoQuitTimer.label"), "autoQuitTimer", (long)0, LocalizationManager.GetLangValue("autoQuitTimer.description"));
+            autoRefershQuestTimer = config.Bind(LocalizationManager.GetEnUSLangValue("autoRefershQuestTimer.label"), "autoRefershQuestTimer", (long)0, LocalizationManager.GetLangValue("autoRefershQuestTimer.description"));
+            isFakeOpenEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isFakeOpenEnable.label"), "isFakeOpenEnable", false, LocalizationManager.GetLangValue("isFakeOpenEnable.description"));
+            buyAdventure = config.Bind(LocalizationManager.GetEnUSLangValue("buyAdventure.label"), "buyAdventure", Utils.BuyAdventureTemplate.DoNothing, LocalizationManager.GetLangValue("buyAdventure.description"));
+            isKarazhanFixEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isKarazhanFixEnable.label"), "isKarazhanFixEnable", false, LocalizationManager.GetLangValue("isKarazhanFixEnable.description"));
+            webServerPort = config.Bind(LocalizationManager.GetEnUSLangValue("webServerPort.label"), "webServerPort", 58744, new ConfigDescription(LocalizationManager.GetLangValue("webServerPort.description"), new AcceptableValueRange<int>(1, 65535)));
+            webPageBackImg = config.Bind(LocalizationManager.GetEnUSLangValue("webPageBackImg.label"), "webPageBackImg", "https://imgapi.cn/cos.php", new ConfigDescription(LocalizationManager.GetLangValue("webPageBackImg.description"), null, new object[] { "Advanced" }));
+            isWebshellEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isWebshellEnable.label"), "isWebshellEnable", false, LocalizationManager.GetLangValue("isWebshellEnable.description"));
+            isInternalModeEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isInternalModeEnable.label"), "isInternalModeEnable", false, LocalizationManager.GetLangValue("isInternalModeEnable.description"));
 
-            fakeDevicePreset = config.Bind(LocalizationManager.GetLangValue("fakeDevicePreset.label"), LocalizationManager.GetLangValue("fakeDevicePreset.name"), Utils.DevicePreset.Default, LocalizationManager.GetLangValue("fakeDevicePreset.description"));
-            fakeDeviceOs = config.Bind(LocalizationManager.GetLangValue("fakeDeviceOs.label"), LocalizationManager.GetLangValue("fakeDeviceOs.name"), OSCategory.PC, LocalizationManager.GetLangValue("fakeDeviceOs.description"));
-            fakeDeviceScreen = config.Bind(LocalizationManager.GetLangValue("fakeDeviceScreen.label"), LocalizationManager.GetLangValue("fakeDeviceScreen.name"), ScreenCategory.PC, LocalizationManager.GetLangValue("fakeDeviceScreen.description"));
-            fakeDeviceName = config.Bind(LocalizationManager.GetLangValue("fakeDeviceName.label"), LocalizationManager.GetLangValue("fakeDeviceName.name"), "HsMod", LocalizationManager.GetLangValue("fakeDeviceName.description"));
+            fakeDevicePreset = config.Bind(LocalizationManager.GetEnUSLangValue("fakeDevicePreset.label"), "fakeDevicePreset", Utils.DevicePreset.Default, LocalizationManager.GetLangValue("fakeDevicePreset.description"));
+            fakeDeviceOs = config.Bind(LocalizationManager.GetEnUSLangValue("fakeDeviceOs.label"), "fakeDeviceOs", OSCategory.PC, LocalizationManager.GetLangValue("fakeDeviceOs.description"));
+            fakeDeviceScreen = config.Bind(LocalizationManager.GetEnUSLangValue("fakeDeviceScreen.label"), "fakeDeviceScreen", ScreenCategory.PC, LocalizationManager.GetLangValue("fakeDeviceScreen.description"));
+            fakeDeviceName = config.Bind(LocalizationManager.GetEnUSLangValue("fakeDeviceName.label"), "fakeDeviceName", "HsMod", LocalizationManager.GetLangValue("fakeDeviceName.description"));
 
-            fakePackCount = config.Bind(LocalizationManager.GetLangValue("fakePackCount.label"), LocalizationManager.GetLangValue("fakePackCount.name"), 233, LocalizationManager.GetLangValue("fakePackCount.description"));
-            fakeBoosterDbId = config.Bind(LocalizationManager.GetLangValue("fakeBoosterDbId.label"), LocalizationManager.GetLangValue("fakeBoosterDbId.name"), BoosterDbId.GOLDEN_CLASSIC_PACK, LocalizationManager.GetLangValue("fakeBoosterDbId.description"));
-            isFakeRandomResult = config.Bind(LocalizationManager.GetLangValue("isFakeRandomResult.label"), LocalizationManager.GetLangValue("isFakeRandomResult.name"), false, LocalizationManager.GetLangValue("isFakeRandomResult.description"));
-            isFakeRandomRarity = config.Bind(LocalizationManager.GetLangValue("isFakeRandomRarity.label"), LocalizationManager.GetLangValue("isFakeRandomRarity.name"), false, LocalizationManager.GetLangValue("isFakeRandomRarity.description"));
-            isFakeRandomPremium = config.Bind(LocalizationManager.GetLangValue("isFakeRandomPremium.label"), LocalizationManager.GetLangValue("isFakeRandomPremium.name"), false, LocalizationManager.GetLangValue("isFakeRandomPremium.description"));
-            isFakeAtypicalRandomPremium = config.Bind(LocalizationManager.GetLangValue("isFakeAtypicalRandomPremium.label"), LocalizationManager.GetLangValue("isFakeAtypicalRandomPremium.name"), false, LocalizationManager.GetLangValue("isFakeAtypicalRandomPremium.description"));
-            fakeRandomRarity = config.Bind(LocalizationManager.GetLangValue("fakeRandomRarity.label"), LocalizationManager.GetLangValue("fakeRandomRarity.name"), Utils.CardRarity.LEGENDARY, LocalizationManager.GetLangValue("fakeRandomRarity.description"));
-            fakeRandomPremium = config.Bind(LocalizationManager.GetLangValue("fakeRandomPremium.label"), LocalizationManager.GetLangValue("fakeRandomPremium.name"), TAG_PREMIUM.GOLDEN, LocalizationManager.GetLangValue("fakeRandomPremium.description"));
+            fakePackCount = config.Bind(LocalizationManager.GetEnUSLangValue("fakePackCount.label"), "fakePackCount", 233, LocalizationManager.GetLangValue("fakePackCount.description"));
+            fakeBoosterDbId = config.Bind(LocalizationManager.GetEnUSLangValue("fakeBoosterDbId.label"), "fakeBoosterDbId", BoosterDbId.GOLDEN_CLASSIC_PACK, LocalizationManager.GetLangValue("fakeBoosterDbId.description"));
+            isFakeRandomResult = config.Bind(LocalizationManager.GetEnUSLangValue("isFakeRandomResult.label"), "isFakeRandomResult", false, LocalizationManager.GetLangValue("isFakeRandomResult.description"));
+            isFakeRandomRarity = config.Bind(LocalizationManager.GetEnUSLangValue("isFakeRandomRarity.label"), "isFakeRandomRarity", false, LocalizationManager.GetLangValue("isFakeRandomRarity.description"));
+            isFakeRandomPremium = config.Bind(LocalizationManager.GetEnUSLangValue("isFakeRandomPremium.label"), "isFakeRandomPremium", false, LocalizationManager.GetLangValue("isFakeRandomPremium.description"));
+            isFakeAtypicalRandomPremium = config.Bind(LocalizationManager.GetEnUSLangValue("isFakeAtypicalRandomPremium.label"), "isFakeAtypicalRandomPremium", false, LocalizationManager.GetLangValue("isFakeAtypicalRandomPremium.description"));
+            fakeRandomRarity = config.Bind(LocalizationManager.GetEnUSLangValue("fakeRandomRarity.label"), "fakeRandomRarity", Utils.CardRarity.LEGENDARY, LocalizationManager.GetLangValue("fakeRandomRarity.description"));
+            fakeRandomPremium = config.Bind(LocalizationManager.GetEnUSLangValue("fakeRandomPremium.label"), "fakeRandomPremium", TAG_PREMIUM.GOLDEN, LocalizationManager.GetLangValue("fakeRandomPremium.description"));
 
-            fakeCatchupCount = config.Bind(LocalizationManager.GetLangValue("fakeCatchupCount.label"), LocalizationManager.GetLangValue("fakeCatchupCount.name"), -1, new ConfigDescription(LocalizationManager.GetLangValue("fakeCatchupCount.description"), null, new object[] { "Advanced" }));
-            fakeCardID1 = config.Bind(LocalizationManager.GetLangValue("fakeCardID1.label"), LocalizationManager.GetLangValue("fakeCardID1.name"), 71984, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID1.description"), null, new object[] { "Advanced" }));
-            fakeCardPremium1 = config.Bind(LocalizationManager.GetLangValue("fakeCardPremium1.label"), LocalizationManager.GetLangValue("fakeCardPremium1.name"), TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium1.description"), null, new object[] { "Advanced" }));
-            fakeCardID2 = config.Bind(LocalizationManager.GetLangValue("fakeCardID2.label"), LocalizationManager.GetLangValue("fakeCardID2.name"), 71945, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID2.description"), null, new object[] { "Advanced" }));
-            fakeCardPremium2 = config.Bind(LocalizationManager.GetLangValue("fakeCardPremium2.label"), LocalizationManager.GetLangValue("fakeCardPremium2.name"), TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium2.description"), null, new object[] { "Advanced" }));
-            fakeCardID3 = config.Bind(LocalizationManager.GetLangValue("fakeCardID3.label"), LocalizationManager.GetLangValue("fakeCardID3.name"), 73446, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID3.description"), null, new object[] { "Advanced" }));
-            fakeCardPremium3 = config.Bind(LocalizationManager.GetLangValue("fakeCardPremium3.label"), LocalizationManager.GetLangValue("fakeCardPremium3.name"), TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium3.description"), null, new object[] { "Advanced" }));
-            fakeCardID4 = config.Bind(LocalizationManager.GetLangValue("fakeCardID4.label"), LocalizationManager.GetLangValue("fakeCardID4.name"), 71781, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID4.description"), null, new object[] { "Advanced" }));
-            fakeCardPremium4 = config.Bind(LocalizationManager.GetLangValue("fakeCardPremium4.label"), LocalizationManager.GetLangValue("fakeCardPremium4.name"), TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium4.description"), null, new object[] { "Advanced" }));
-            fakeCardID5 = config.Bind(LocalizationManager.GetLangValue("fakeCardID5.label"), LocalizationManager.GetLangValue("fakeCardID5.name"), 67040, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID5.description"), null, new object[] { "Advanced" }));
-            fakeCardPremium5 = config.Bind(LocalizationManager.GetLangValue("fakeCardPremium5.label"), LocalizationManager.GetLangValue("fakeCardPremium5.name"), TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium5.description"), null, new object[] { "Advanced" }));
-            isAutoRedundantNDE = config.Bind(LocalizationManager.GetLangValue("isAutoRedundantNDE.label"), LocalizationManager.GetLangValue("isAutoRedundantNDE.name"), false, LocalizationManager.GetLangValue("isAutoRedundantNDE.description"));
+            fakeCatchupCount = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCatchupCount.label"), "fakeCatchupCount", -1, new ConfigDescription(LocalizationManager.GetLangValue("fakeCatchupCount.description"), null, new object[] { "Advanced" }));
+            fakeCardID1 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardID1.label"), "fakeCardID1", 71984, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID1.description"), null, new object[] { "Advanced" }));
+            fakeCardPremium1 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardPremium1.label"), "fakeCardPremium1", TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium1.description"), null, new object[] { "Advanced" }));
+            fakeCardID2 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardID2.label"), "fakeCardID2", 71945, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID2.description"), null, new object[] { "Advanced" }));
+            fakeCardPremium2 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardPremium2.label"), "fakeCardPremium2", TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium2.description"), null, new object[] { "Advanced" }));
+            fakeCardID3 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardID3.label"), "fakeCardID3", 73446, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID3.description"), null, new object[] { "Advanced" }));
+            fakeCardPremium3 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardPremium3.label"), "fakeCardPremium3", TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium3.description"), null, new object[] { "Advanced" }));
+            fakeCardID4 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardID4.label"), "fakeCardID4", 71781, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID4.description"), null, new object[] { "Advanced" }));
+            fakeCardPremium4 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardPremium4.label"), "fakeCardPremium4", TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium4.description"), null, new object[] { "Advanced" }));
+            fakeCardID5 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardID5.label"), "fakeCardID5", 67040, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardID5.description"), null, new object[] { "Advanced" }));
+            fakeCardPremium5 = config.Bind(LocalizationManager.GetEnUSLangValue("fakeCardPremium5.label"), "fakeCardPremium5", TAG_PREMIUM.GOLDEN, new ConfigDescription(LocalizationManager.GetLangValue("fakeCardPremium5.description"), null, new object[] { "Advanced" }));
+            isAutoRedundantNDE = config.Bind(LocalizationManager.GetEnUSLangValue("isAutoRedundantNDE.label"), "isAutoRedundantNDE", false, LocalizationManager.GetLangValue("isAutoRedundantNDE.description"));
 
             InitCardsMapping();
             LoadSkinsConfigFromFile();

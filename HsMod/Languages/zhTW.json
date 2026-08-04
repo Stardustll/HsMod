@@ -17,7 +17,7 @@
 	"isPluginEnable.description": "是否啟用外掛程式（修改此選項後建議重新啟動爐石戰記）",
 	"pluginLanague.name": "HsMod語言",
 	"pluginLanague.label": "全域",
-	"pluginLanague.description": "外掛程式偏好語言（修改此選項後需重新啟動爐石戰記且舊設定可能失效，請留意備份HsMod.cfg）",
+	"pluginLanague.description": "外掛程式偏好語言（修改此選項後需重新啟動爐石戰記）",
 	"configTemplate.name": "設定範本",
 	"configTemplate.label": "全域",
 	"configTemplate.description": "設定執行範本，當選項為DoNothing時，不修改任何設定。設定修改完成後自動替換回[DoNothing]",

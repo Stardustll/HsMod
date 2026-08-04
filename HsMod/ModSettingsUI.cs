@@ -144,7 +144,7 @@ namespace HsMod
             if (visible) SetVisible(false);
         }
 
-        //反射收集全部配置项，节与名称在 config.Bind 时已本地化
+        //反射收集全部配置项；名称与分组改用语言文件本地化显示（配置文件内是语言无关的字段名）
         private void ReloadEntries()
         {
             allEntries.Clear();
@@ -157,12 +157,26 @@ namespace HsMod
                     continue;
                 object[] tags = config.Description?.Tags;
                 bool advanced = (tags != null && tags.Any(t => "Advanced".Equals(t as string))) || InternalFields.Contains(field.Name);
+                //两个内部保留项没有语言文件键（且不能新增：会把 HsMod.Init.Language/Eula 误判为
+                //旧本地化 key 并迁移到不存在的键名），直接显示配置文件中的稳定 section/key
+                string entryName;
+                string entrySection;
+                if (InternalFields.Contains(field.Name))
+                {
+                    entryName = config.Definition?.Key ?? field.Name;
+                    entrySection = config.Definition?.Section ?? "";
+                }
+                else
+                {
+                    entryName = LocalizationManager.GetLangValue(field.Name + ".name");
+                    entrySection = LocalizationManager.GetLangValue(field.Name + ".label");
+                }
                 Entry entry = new Entry
                 {
                     FieldName = field.Name,
                     Config = config,
-                    Name = config.Definition.Key,
-                    Section = config.Definition.Section,
+                    Name = entryName,
+                    Section = entrySection,
                     Description = config.Description?.Description ?? "",
                     IsAdvanced = advanced
                 };
