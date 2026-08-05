@@ -212,7 +212,6 @@ namespace HsMod
             LoadPatch(typeof(Patcher.PatchLogArchive));
             LoadPatch(typeof(Patcher.PatchBattlegrounds));
             LoadPatch(typeof(Patcher.PatchBgsUnlockCollection));
-            LoadPatch(typeof(Patcher.PatchRankedCollectionUnlock));
             LoadPatch(typeof(Patcher.PatchFavorite));
             LoadPatch(typeof(Patcher.PatchFakeDevice));
             LoadPatch(typeof(Patcher.PatchDevOptioins));

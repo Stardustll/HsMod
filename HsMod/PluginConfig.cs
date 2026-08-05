@@ -64,7 +64,6 @@ namespace HsMod
         public static ConfigEntry<bool> isBgsGoldenEnable;
         public static ConfigEntry<bool> isBgsSeasonTicketUnlock;
         public static ConfigEntry<bool> isBgsUnlockCollectionEnable;
-        public static ConfigEntry<bool> isRankedCollectionUnlockEnable;
         public static ConfigEntry<bool> isBgRankEnable;
         public static ConfigEntry<bool> isBgSessionStatsEnable;
         public static ConfigEntry<bool> isBgAutoSquelchEnable;
@@ -431,7 +430,6 @@ namespace HsMod
             isBgsGoldenEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgsGoldenEnable.label"), "isBgsGoldenEnable", false, LocalizationManager.GetLangValue("isBgsGoldenEnable.description"));
             isBgsSeasonTicketUnlock = config.Bind(LocalizationManager.GetEnUSLangValue("isBgsSeasonTicketUnlock.label"), "isBgsSeasonTicketUnlock", false, LocalizationManager.GetLangValue("isBgsSeasonTicketUnlock.description"));
             isBgsUnlockCollectionEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgsUnlockCollectionEnable.label"), "isBgsUnlockCollectionEnable", false, LocalizationManager.GetLangValue("isBgsUnlockCollectionEnable.description"));
-            isRankedCollectionUnlockEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isRankedCollectionUnlockEnable.label"), "isRankedCollectionUnlockEnable", false, LocalizationManager.GetLangValue("isRankedCollectionUnlockEnable.description"));
             isBgRankEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgRankEnable.label"), "isBgRankEnable", true, LocalizationManager.GetLangValue("isBgRankEnable.description"));
             isBgSessionStatsEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgSessionStatsEnable.label"), "isBgSessionStatsEnable", true, LocalizationManager.GetLangValue("isBgSessionStatsEnable.description"));
             isBgAutoSquelchEnable = config.Bind(LocalizationManager.GetEnUSLangValue("isBgAutoSquelchEnable.label"), "isBgAutoSquelchEnable", false, LocalizationManager.GetLangValue("isBgAutoSquelchEnable.description"));
