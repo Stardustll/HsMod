@@ -164,7 +164,8 @@ namespace HsMod
                     }
                     try
                     {
-                        string path = def.CardDef.PortraitTexturePath;
+                        TAG_PREMIUM usedPremium;
+                        string path = def.CardDef.GetPortraitTexturePath(TAG_PREMIUM.NORMAL, true, out usedPremium);
                         if (string.IsNullOrEmpty(path))
                         {
                             CompleteLoad(key, null);
@@ -183,7 +184,7 @@ namespace HsMod
                     Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"SkinImages.StartLoadCardImage({key}): {ex.Message}");
                     CompleteLoad(key, null);
                 }
-            }, null, CardPortraitQuality.GetDefault());
+            }, null);
         }
 
         //卡背：通过 CardBackManager 加载，取 m_CardBackTexture

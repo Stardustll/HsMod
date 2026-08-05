@@ -363,6 +363,7 @@ MigrationBackup/
 FodyWeavers.xsd
 
 .idea/
+.agents/
 .github/.DS_Store
 HsMod/.DS_Store
 .DS_Store
