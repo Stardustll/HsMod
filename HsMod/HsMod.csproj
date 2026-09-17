@@ -395,6 +395,7 @@
     <Compile Include="Patcher.cs" />
     <Compile Include="Patches\Helpers.cs" />
     <Compile Include="Patches\*.cs" Exclude="Patches\Helpers.cs" />
+    <Compile Include="Utilities\*.cs" />
     <Compile Include="Main.cs" />
     <Compile Include="ModSettingsUI.cs" />
     <Compile Include="BgPetSpoofer.cs" />
@@ -407,6 +408,9 @@
     <Compile Include="UtilsSkins.cs" />
     <Compile Include="Utils.cs" />
     <Compile Include="UtilsArgu.cs" />
+    <Compile Include="StorePanel.cs" />
+    <Compile Include="SkinPanel.cs" />
+    <Compile Include="SkinImages.cs" />
     <Compile Include="WebApi.cs" />
     <Compile Include="WebPage.cs" />
     <Compile Include="WebServer.cs" />

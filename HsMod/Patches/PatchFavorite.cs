@@ -1,4 +1,4 @@
-using Blizzard.T5.Core;
+﻿using Blizzard.T5.Core;
 using HarmonyLib;
 using System;
 using System.Collections.Generic;
@@ -1219,6 +1219,100 @@ namespace HsMod
             //    }
             //    return true;
             //}
+
+
+        //是否应用本地英雄外观（对战/酒馆通用判定）
+        internal static bool ShouldApplyHeroVisuals(bool isBattlegrounds)
+        {
+            if (!isBattlegrounds)
+            {
+                return PluginConfig.CollectionVisualsEnabled;
+            }
+            return true;
+        }
+
+        //按本地配置解析对局中实际使用的英雄卡（默认英雄/对手皮肤/本地收藏/映射），供英雄形态做一致性校验
+        internal static string SelectConstructedHeroCard(string cardId, Player.Side side)
+        {
+            if (!ShouldApplyHeroVisuals(false))
+            {
+                return cardId;
+            }
+            if (PluginConfig.isSkinDefalutHeroEnable.Value)
+            {
+                GameMgr gameMgr = GameMgr.Get();
+                if (gameMgr == null || !gameMgr.IsBattlegrounds())
+                {
+                    try
+                    {
+                        TAG_CLASS heroClass = DefLoader.Get().GetEntityDef(cardId).GetClass();
+                        if (GameUtils.ORDERED_HERO_CLASSES.Contains(heroClass))
+                        {
+                            string vanillaHero = CollectionManager.GetVanillaHero(heroClass);
+                            if (!string.IsNullOrEmpty(vanillaHero))
+                            {
+                                return vanillaHero;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Utils.MyLogger(BepInEx.Logging.LogLevel.Error, ex.ToString());
+                    }
+                }
+            }
+            if (side == Player.Side.OPPOSING)
+            {
+                if (PluginConfig.skinOpposingHero.Value != -1)
+                {
+                    return GameUtils.TranslateDbIdToCardId(PluginConfig.skinOpposingHero.Value, false);
+                }
+                return cardId;
+            }
+            if (side != Player.Side.FRIENDLY)
+            {
+                return cardId;
+            }
+            string localHeroForClass = PatchCollectionUnlock.GetLocalHeroForClass(DefLoader.Get().GetEntityDef(cardId).GetClass());
+            if (!string.IsNullOrEmpty(localHeroForClass))
+            {
+                return localHeroForClass;
+            }
+            if (PluginConfig.skinHero.Value != -1)
+            {
+                return GameUtils.TranslateDbIdToCardId(PluginConfig.skinHero.Value, false);
+            }
+            int dbId = GameUtils.TranslateCardIdToDbId(cardId, false);
+            if (PluginConfig.HeroesMapping.TryGetValue(dbId, out int mappedDbId))
+            {
+                if (Utils.CheckInfo.IsHero(mappedDbId, out Assets.CardHero.HeroType heroType)
+                    && heroType != Assets.CardHero.HeroType.BATTLEGROUNDS_HERO
+                    && heroType != Assets.CardHero.HeroType.BATTLEGROUNDS_GUIDE)
+                {
+                    return GameUtils.TranslateDbIdToCardId(mappedDbId, false);
+                }
+                return cardId;
+            }
+            return cardId;
+        }
+
+        //收藏偏好变化后触发 NetCache 上的对应事件，让收藏页立即刷新
+        internal static void InvokeNetCacheEvent(string eventName, params object[] args)
+        {
+            try
+            {
+                NetCache netCache = NetCache.Get();
+                if (netCache != null)
+                {
+                    Traverse.Create(netCache).Field(eventName).GetValue<Delegate>()?.DynamicInvoke(args);
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"InvokeNetCacheEvent {eventName}: {ex}");
+            }
+        }
+
         }
     }
 }

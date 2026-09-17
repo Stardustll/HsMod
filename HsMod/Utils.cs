@@ -822,7 +822,7 @@ namespace HsMod
                             if (!bundle.TryGetBundlePrice(CurrencyType.GOLD, out _))
                             {
                                 Utils.MyLogger(LogLevel.Info, $"Found {bundle?.Title}.");
-                                StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, CurrencyType.GOLD, 1));
+                                StoreManager.Get().StartStoreBuy(new BuyProductEventArgs(bundle, CurrencyType.GOLD, 1));
                                 UIStatus.Get().AddInfo(LocalizationManager.GetLangValue("info.waitPurchase"), 60);
                                 return;
                             }
@@ -835,7 +835,7 @@ namespace HsMod
                                 //if (bundle.Id.Value == 1914499)
                                 //{
                                 //    Utils.MyLogger(LogLevel.Info, $"found.");
-                                //    StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, CurrencyType.GOLD, 1));
+                                //    StoreManager.Get().StartStoreBuy(new BuyProductEventArgs(bundle, CurrencyType.GOLD, 1));
                                 //    UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
                                 //    return;
                                 //}
@@ -850,7 +850,7 @@ namespace HsMod
                                 if (totalPrice == 0)
                                 {
                                     Utils.MyLogger(LogLevel.Warning, $"{t.ToString()}[true] id={bundle?.Id} title={bundle?.Title} price=0!!!");
-                                    //StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, pt, 1));
+                                    //StoreManager.Get().StartStoreBuy(new BuyProductEventArgs(bundle, pt, 1));
                                 }
 
                             }
@@ -882,7 +882,7 @@ namespace HsMod
                                     //if (bundle.Id.Value == 1851720)
                                     //{
                                     //    Utils.MyLogger(LogLevel.Info, $"Found {bundle?.Title}.");
-                                    //    StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, CurrencyType.GOLD, 1));
+                                    //    StoreManager.Get().StartStoreBuy(new BuyProductEventArgs(bundle, CurrencyType.GOLD, 1));
                                     //    UIStatus.Get().AddInfo("请等待购买完成，如果UI卡住，请重进游戏。", 60);
                                     //    return;
                                     //}
@@ -890,7 +890,7 @@ namespace HsMod
                                     //continue;
                                     //
                                     Utils.MyLogger(LogLevel.Info, $"Found {bundle?.Title}.");
-                                    StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(bundle, (CurrencyType)(targetFrameRate.Value - 180), 1));
+                                    StoreManager.Get().StartStoreBuy(new BuyProductEventArgs(bundle, (CurrencyType)(targetFrameRate.Value - 180), 1));
                                     UIStatus.Get().AddInfo(LocalizationManager.GetLangValue("info.waitPurchase"), 60);
                                     return;
                                 }
@@ -911,7 +911,7 @@ namespace HsMod
                             //        if (totalPrice == 0)
                             //        {
                             //            Utils.MyLogger(LogLevel.Warning, $"{t.ToString()}[true] id={bundle?.Id} title={bundle?.Title} price=0!!!");
-                            //            //StoreManager.Get().StartStoreBuy(new BuyPmtProductEventArgs(gz, pt, 1));
+                            //            //StoreManager.Get().StartStoreBuy(new BuyProductEventArgs(gz, pt, 1));
                             //        }
                             //    }
                             //}
@@ -1596,5 +1596,25 @@ namespace HsMod
 
             yield break;
         }
+		private static bool readingNativePremium;    //读取原生品质时的重入保护，避免本地覆盖自引用
+
+		//读取未被本地覆盖的原生品质值：置位重入标志后调用，GetPremiumType 补丁见标志即放行原生结果
+		internal static TAG_PREMIUM ReadNativePremium(EntityBase entity)
+		{
+			bool previous = readingNativePremium;
+			try
+			{
+				readingNativePremium = true;
+				return entity.GetPremiumType();
+			}
+			finally
+			{
+				readingNativePremium = previous;
+			}
+		}
+
+		//补丁入口：处于原生读取中时直接放行，不做本地覆盖
+		internal static bool ReadingNativePremium => readingNativePremium;
+
     }
 }

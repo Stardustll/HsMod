@@ -46,6 +46,8 @@ namespace HsMod
         public static ConfigEntry<bool> isShowRetireForever;
         public static ConfigEntry<bool> isIdleKickEnable;
         public static ConfigEntry<bool> isBypassDeckShareCodeCheckEnable;
+        public static ConfigEntry<bool> isFatalErrorAutoConfirmEnable;    //致命错误退出弹窗持续超时后自动确认关闭
+        public static ConfigEntry<bool> isTransitionPopupGuardEnable;    //"找寻对手"弹窗卡死时自动取消/隐藏
 
         //public static ConfigEntry<Utils.QuickMode> quickModeState;
         public static ConfigEntry<bool> isQuickModeEnable;
@@ -63,6 +65,8 @@ namespace HsMod
         public static ConfigEntry<bool> isBgsGoldenEnable;
         public static ConfigEntry<bool> isBgsSeasonTicketUnlock;
         public static ConfigEntry<bool> isBgsUnlockCollectionEnable;
+        public static ConfigEntry<bool> isCollectionUnlockEnable;    //普通收藏本地解锁总开关
+        public static ConfigEntry<bool> isHeroFormsEnable;    //英雄形态：本地切换英雄的变身后外观
         public static ConfigEntry<bool> isBgRankEnable;
         public static ConfigEntry<bool> isBgSessionStatsEnable;
         public static ConfigEntry<bool> isBgAutoSquelchEnable;
@@ -125,6 +129,7 @@ namespace HsMod
         public static ConfigEntry<bool> isSkinDefalutHeroEnable;
 
         public static ConfigEntry<bool> isModSettingsButtonShow;
+        public static ConfigEntry<bool> isStoreEnable;    //设置界面左侧商店（零元购）按钮，默认隐藏，高级选项中开启
         public static ConfigEntry<bool> isShowFPSEnable;
         public static ConfigEntry<bool> isInternalModeEnable;
         public static ConfigEntry<int> webServerPort;
@@ -140,6 +145,36 @@ namespace HsMod
         public static ConfigEntry<OSCategory> fakeDeviceOs;
         public static ConfigEntry<ScreenCategory> fakeDeviceScreen;
         public static ConfigEntry<string> fakeDeviceName;
+
+        //普通收藏外观：英雄皮肤的全部收藏目标（HsSkins.cfg 多值），HeroesMapping 取其中随机一个用于对局
+        internal static Dictionary<int, List<int>> HeroSkinPreferences = new Dictionary<int, List<int>>();
+
+        //宠物皮肤映射（HsPetSkins.cfg：petId:variantId）
+        public static Dictionary<int, int> PetSkinMapping = new Dictionary<int, int>();
+
+        public static string PetSkinMappingPath
+        {
+            get { return Path.Combine(BepInEx.Paths.ConfigPath, "HsPetSkins.cfg"); }
+        }
+
+        //收藏外观总开关：插件启用且"解锁收藏外观"打开时生效
+        internal static bool CollectionVisualsEnabled
+        {
+            get
+            {
+                ConfigEntry<bool> pluginEnable = isPluginEnable;
+                if (pluginEnable != null && pluginEnable.Value && isCollectionUnlockEnable != null)
+                {
+                    return isCollectionUnlockEnable.Value;
+                }
+                return false;
+            }
+        }
+
+        internal static bool LocalPetVisualEnabled(bool battlegrounds)
+        {
+            return CollectionVisualsEnabled;
+        }
 
         public static ConfigEntry<int> fakePackCount;
         public static ConfigEntry<BoosterDbId> fakeBoosterDbId;
@@ -213,6 +248,7 @@ namespace HsMod
             isShowFPSEnable = config.Bind(LocalizationManager.GetLangValue("isShowFPSEnable.label"), LocalizationManager.GetLangValue("isShowFPSEnable.name"), false, LocalizationManager.GetLangValue("isShowFPSEnable.description"));
             targetFrameRate = config.Bind(LocalizationManager.GetLangValue("targetFrameRate.label"), LocalizationManager.GetLangValue("targetFrameRate.name"), -1, new ConfigDescription(LocalizationManager.GetLangValue("targetFrameRate.description"), new AcceptableValueRange<int>(-1, 2333)));
             isModSettingsButtonShow = config.Bind(LocalizationManager.GetLangValue("isModSettingsButtonShow.label"), LocalizationManager.GetLangValue("isModSettingsButtonShow.name"), true, LocalizationManager.GetLangValue("isModSettingsButtonShow.description"));
+            isStoreEnable = config.Bind(LocalizationManager.GetLangValue("isStoreEnable.label"), LocalizationManager.GetLangValue("isStoreEnable.name"), false, new ConfigDescription(LocalizationManager.GetLangValue("isStoreEnable.description"), null, new object[] { "Advanced" }));
 
             isIGMMessageShow = config.Bind(LocalizationManager.GetLangValue("isIGMMessageShow.label"), LocalizationManager.GetLangValue("isIGMMessageShow.name"), true, LocalizationManager.GetLangValue("isIGMMessageShow.description"));
             isAlertPopupShow = config.Bind(LocalizationManager.GetLangValue("isAlertPopupShow.label"), LocalizationManager.GetLangValue("isAlertPopupShow.name"), true, LocalizationManager.GetLangValue("isAlertPopupShow.description"));
@@ -227,6 +263,8 @@ namespace HsMod
             isBypassDeckShareCodeCheckEnable = config.Bind(LocalizationManager.GetLangValue("isBypassDeckShareCodeCheckEnable.label"), LocalizationManager.GetLangValue("isBypassDeckShareCodeCheckEnable.name"), false, LocalizationManager.GetLangValue("isBypassDeckShareCodeCheckEnable.description"));
             isShowRetireForever = config.Bind(LocalizationManager.GetLangValue("isShowRetireForever.label"), LocalizationManager.GetLangValue("isShowRetireForever.name"), false, LocalizationManager.GetLangValue("isShowRetireForever.description"));
             isIdleKickEnable = config.Bind(LocalizationManager.GetLangValue("isIdleKickEnable.label"), LocalizationManager.GetLangValue("isIdleKickEnable.name"), true, LocalizationManager.GetLangValue("isIdleKickEnable.description"));
+            isFatalErrorAutoConfirmEnable = config.Bind(LocalizationManager.GetLangValue("isFatalErrorAutoConfirmEnable.label"), LocalizationManager.GetLangValue("isFatalErrorAutoConfirmEnable.name"), false, LocalizationManager.GetLangValue("isFatalErrorAutoConfirmEnable.description"));
+            isTransitionPopupGuardEnable = config.Bind(LocalizationManager.GetLangValue("isTransitionPopupGuardEnable.label"), LocalizationManager.GetLangValue("isTransitionPopupGuardEnable.name"), true, LocalizationManager.GetLangValue("isTransitionPopupGuardEnable.description"));
 
 
             isQuickPackOpeningEnable = config.Bind(LocalizationManager.GetLangValue("isQuickPackOpeningEnable.label"), LocalizationManager.GetLangValue("isQuickPackOpeningEnable.name"), false, LocalizationManager.GetLangValue("isQuickPackOpeningEnable.description"));
@@ -266,6 +304,8 @@ namespace HsMod
             isBgsGoldenEnable = config.Bind(LocalizationManager.GetLangValue("isBgsGoldenEnable.label"), LocalizationManager.GetLangValue("isBgsGoldenEnable.name"), false, LocalizationManager.GetLangValue("isBgsGoldenEnable.description"));
             isBgsSeasonTicketUnlock = config.Bind(LocalizationManager.GetLangValue("isBgsSeasonTicketUnlock.label"), LocalizationManager.GetLangValue("isBgsSeasonTicketUnlock.name"), false, LocalizationManager.GetLangValue("isBgsSeasonTicketUnlock.description"));
             isBgsUnlockCollectionEnable = config.Bind(LocalizationManager.GetLangValue("isBgsUnlockCollectionEnable.label"), LocalizationManager.GetLangValue("isBgsUnlockCollectionEnable.name"), false, LocalizationManager.GetLangValue("isBgsUnlockCollectionEnable.description"));
+            isCollectionUnlockEnable = config.Bind(LocalizationManager.GetLangValue("isCollectionUnlockEnable.label"), LocalizationManager.GetLangValue("isCollectionUnlockEnable.name"), false, LocalizationManager.GetLangValue("isCollectionUnlockEnable.description"));
+            isHeroFormsEnable = config.Bind(LocalizationManager.GetLangValue("isHeroFormsEnable.label"), LocalizationManager.GetLangValue("isHeroFormsEnable.name"), false, LocalizationManager.GetLangValue("isHeroFormsEnable.description"));
             isBgRankEnable = config.Bind(LocalizationManager.GetLangValue("isBgRankEnable.label"), LocalizationManager.GetLangValue("isBgRankEnable.name"), true, LocalizationManager.GetLangValue("isBgRankEnable.description"));
             isBgSessionStatsEnable = config.Bind(LocalizationManager.GetLangValue("isBgSessionStatsEnable.label"), LocalizationManager.GetLangValue("isBgSessionStatsEnable.name"), true, LocalizationManager.GetLangValue("isBgSessionStatsEnable.description"));
             isBgAutoSquelchEnable = config.Bind(LocalizationManager.GetLangValue("isBgAutoSquelchEnable.label"), LocalizationManager.GetLangValue("isBgAutoSquelchEnable.name"), false, LocalizationManager.GetLangValue("isBgAutoSquelchEnable.description"));
@@ -329,10 +369,7 @@ namespace HsMod
             isWebshellEnable = config.Bind(LocalizationManager.GetLangValue("isWebshellEnable.label"), LocalizationManager.GetLangValue("isWebshellEnable.name"), false, LocalizationManager.GetLangValue("isWebshellEnable.description"));
             isInternalModeEnable = config.Bind(LocalizationManager.GetLangValue("isInternalModeEnable.label"), LocalizationManager.GetLangValue("isInternalModeEnable.name"), false, LocalizationManager.GetLangValue("isInternalModeEnable.description"));
 
-            fakeDevicePreset = config.Bind(LocalizationManager.GetLangValue("fakeDevicePreset.label"), LocalizationManager.GetLangValue("fakeDevicePreset.name"), Utils.DevicePreset.Default, LocalizationManager.GetLangValue("fakeDevicePreset.description"));
-            fakeDeviceOs = config.Bind(LocalizationManager.GetLangValue("fakeDeviceOs.label"), LocalizationManager.GetLangValue("fakeDeviceOs.name"), OSCategory.PC, LocalizationManager.GetLangValue("fakeDeviceOs.description"));
-            fakeDeviceScreen = config.Bind(LocalizationManager.GetLangValue("fakeDeviceScreen.label"), LocalizationManager.GetLangValue("fakeDeviceScreen.name"), ScreenCategory.PC, LocalizationManager.GetLangValue("fakeDeviceScreen.description"));
-            fakeDeviceName = config.Bind(LocalizationManager.GetLangValue("fakeDeviceName.label"), LocalizationManager.GetLangValue("fakeDeviceName.name"), "HsMod", LocalizationManager.GetLangValue("fakeDeviceName.description"));
+            DeviceSimulation.BindSettings(config);    //设备伪装四项（带可选值校验器，供设置页与网页下拉）
 
             fakePackCount = config.Bind(LocalizationManager.GetLangValue("fakePackCount.label"), LocalizationManager.GetLangValue("fakePackCount.name"), 233, LocalizationManager.GetLangValue("fakePackCount.description"));
             fakeBoosterDbId = config.Bind(LocalizationManager.GetLangValue("fakeBoosterDbId.label"), LocalizationManager.GetLangValue("fakeBoosterDbId.name"), BoosterDbId.GOLDEN_CLASSIC_PACK, LocalizationManager.GetLangValue("fakeBoosterDbId.description"));
@@ -529,24 +566,31 @@ namespace HsMod
         {
             string file = Path.Combine(BepInEx.Paths.ConfigPath, "HsSkins.cfg");
             HeroesMapping.Clear();
+            HeroSkinPreferences.Clear();    //多值收藏目标：收藏页用它列出全部可选皮肤
             if (File.Exists(file))
             {
                 foreach (string line in File.ReadLines(file))
                 {
                     if (line.StartsWith("#"))
                         continue;
-                    else
+                    string[] parts = line.Split(':');
+                    if (parts.Length != 2)
+                        continue;
+                    int source;
+                    if (!int.TryParse(parts[0].Trim(), out source) || source <= 0)
+                        continue;
+                    List<int> targets = new List<int>();
+                    foreach (string skin in parts[1].Split(','))
                     {
-                        string[] parts = line.Split(':');
-                        if (parts.Length == 2)
-                        {
-                            if (!HeroesMapping.ContainsKey(int.Parse(parts[0].Trim())))
-                            {
-                                string[] skins = parts[1].Split(',');
-                                HeroesMapping.Add(int.Parse(parts[0].Trim()), int.Parse(skins[new System.Random().Next(skins.Length)].Trim()));
-                            }
-                        }
+                        int target;
+                        if (int.TryParse(skin.Trim(), out target) && target > 0 && !targets.Contains(target))
+                            targets.Add(target);
                     }
+                    if (targets.Count == 0)
+                        continue;
+                    HeroSkinPreferences[source] = targets;
+                    if (!HeroesMapping.ContainsKey(source))
+                        HeroesMapping.Add(source, targets[new System.Random().Next(targets.Count)]);    //对局中随机取一个
                 }
             }
             else
@@ -554,9 +598,66 @@ namespace HsMod
                 string newConfigFile = LocalizationManager.GetLangValue("HsSkins.cfg");
                 File.WriteAllText(file, newConfigFile);
             }
+            LoadPetSkinMappingFromFile();
         }
 
         public static ConfigValue configValue = new ConfigValue();
+
+		//读取宠物皮肤映射（HsPetSkins.cfg）
+		public static void LoadPetSkinMappingFromFile()
+		{
+			try
+			{
+				Dictionary<int, int> mapping = new Dictionary<int, int>();
+				string file = PetSkinMappingPath;
+				if (File.Exists(file))
+				{
+					foreach (string line in File.ReadLines(file))
+					{
+						string text = line.Trim();
+						if (text.Length == 0 || text.StartsWith("#"))
+						{
+							continue;
+						}
+						string[] parts = text.Split(':');
+						if (parts.Length == 2)
+						{
+							int petId;
+							int variantId;
+							if (int.TryParse(parts[0].Trim(), out petId) && int.TryParse(parts[1].Trim(), out variantId) && petId > 0 && variantId > 0)
+							{
+								mapping[petId] = variantId;
+							}
+						}
+					}
+				}
+				PetSkinMapping = mapping;
+			}
+			catch (Exception ex)
+			{
+				Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, "读取宠物皮肤配置失败: " + ex.Message);
+			}
+		}
+
+		public static void SavePetSkinMappingToFile()
+		{
+			try
+			{
+				List<string> lines = new List<string> { "# petId:variantId" };
+				foreach (KeyValuePair<int, int> item in new SortedDictionary<int, int>(PetSkinMapping))
+				{
+					if (item.Key > 0 && item.Value > 0)
+					{
+						lines.Add(item.Key + ":" + item.Value);
+					}
+				}
+				File.WriteAllLines(PetSkinMappingPath, lines, new System.Text.UTF8Encoding(false));
+			}
+			catch (Exception ex)
+			{
+				Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, "保存宠物皮肤配置失败: " + ex.Message);
+			}
+		}
     }
 
 
@@ -682,6 +783,8 @@ namespace HsMod
         {
             return PluginConfig.configValue;
         }
+
+
 
     }
 }

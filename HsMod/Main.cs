@@ -471,7 +471,28 @@ namespace HsMod
                     }
                 }
             }
+
+            //每帧守卫：弹窗卡死自愈 + 致命错误弹窗自动确认（后者默认关闭）
+            try
+            {
+                if (isPluginEnable.Value)
+                {
+                    if (isTransitionPopupGuardEnable.Value)
+                    {
+                        if (s_transitionPopupObserver == null)
+                            s_transitionPopupObserver = new TransitionPopupStuckObserver();
+                        TransitionPopupGuard.Tick(s_transitionPopupObserver, "HsMod");
+                    }
+                    FatalErrorGuard.Tick();
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Debug, $"守卫 Tick 异常: {ex.Message}");
+            }
         }
+
+        private static TransitionPopupStuckObserver s_transitionPopupObserver;
 
         private void OnDestroy()
         {

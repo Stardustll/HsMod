@@ -10,6 +10,7 @@ namespace HsMod
         {
             try
             {
+                if (ReadingNativePremium) return true;    //正在读取原生品质，放行
                 if (GameMgr.Get() != null && GameState.Get() != null && ___m_entity != null && GameState.Get().IsGameCreatedOrCreating())
                 {
                     //跳过酒馆随从

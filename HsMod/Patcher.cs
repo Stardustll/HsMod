@@ -1,4 +1,4 @@
-using Blizzard.T5.Core.Time;
+﻿using Blizzard.T5.Core.Time;
 using HarmonyLib;
 using System;
 using System.Collections.Generic;
@@ -43,9 +43,9 @@ namespace HsMod
                     }
                 }
                 Utils.MyLogger(BepInEx.Logging.LogLevel.Error, $"{loadType.Name} => {ex.Message} \n{ex.InnerException}");
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Error, "HsMod patch failed!");
-                System.Threading.Thread.Sleep(11451);
-                Utils.Quit(114514);
+                //单个补丁类失败（多为游戏更新后目标方法改名/移除）不应导致整个插件退出：
+                //跳过该类，其余补丁继续加载，避免白屏闪退
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Error, $"{loadType.Name} patch skipped (目标方法可能已随游戏更新变更)");
             }
         }
 
@@ -175,6 +175,29 @@ namespace HsMod
                 {
                     UnPatch("PatchDeathOb");
                 }
+                SpectatorHandLayout.SetPatched(isMoveEnemyCardsEnable.Value);    //开关切换后让对手手牌布局立即生效
+            };
+            isHeroFormsEnable.SettingChanged += delegate
+            {
+                if (isHeroFormsEnable.Value)
+                {
+                    LoadPatch(typeof(Patcher.PatchHeroForms));
+                }
+                else
+                {
+                    UnPatch("PatchHeroForms");
+                }
+            };
+            isCollectionUnlockEnable.SettingChanged += delegate
+            {
+                if (isCollectionUnlockEnable.Value)
+                {
+                    LoadPatch(typeof(Patcher.PatchCollectionUnlock));
+                }
+                else
+                {
+                    UnPatch("PatchCollectionUnlock");
+                }
             };
             isFakeOpenEnable.SettingChanged += delegate
             {
@@ -214,6 +237,7 @@ namespace HsMod
             LoadPatch(typeof(Patcher.PatchBgsUnlockCollection));
             LoadPatch(typeof(Patcher.PatchFavorite));
             LoadPatch(typeof(Patcher.PatchFakeDevice));
+            LoadPatch(typeof(Patcher.PatchPlatformSettings));
             LoadPatch(typeof(Patcher.PatchDevOptioins));
             LoadPatch(typeof(Patcher.PatchGameMenu));
             LoadPatch(typeof(Patcher.PatchBgRank));
@@ -228,6 +252,15 @@ namespace HsMod
             if (isMoveEnemyCardsEnable.Value)
             {
                 LoadPatch(typeof(Patcher.PatchDeathOb));
+                SpectatorHandLayout.SetPatched(true);
+            }
+            if (isCollectionUnlockEnable.Value)
+            {
+                LoadPatch(typeof(Patcher.PatchCollectionUnlock));
+            }
+            if (isHeroFormsEnable.Value)
+            {
+                LoadPatch(typeof(Patcher.PatchHeroForms));
             }
             if (isAutoRecvMercenaryRewardEnable.Value)
             {
@@ -250,6 +283,7 @@ namespace HsMod
         }
         public static void UnPatchAll()
         {
+            SpectatorHandLayout.SetPatched(false);
             for (int i = 0; i < AllHarmony.Count; i++)
             {
                 AllHarmony[i].UnpatchSelf();
