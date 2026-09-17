@@ -549,7 +549,7 @@ namespace HsMod
                 return false;
             }
 
-            private static int SaveLocalBgsPetFavorite(int petId, bool favorite)
+            private static int SaveLocalPetFavorite(int petId, bool favorite)
             {
                 int petVariantId = GetFirstPetVariantId(petId);
                 if (petVariantId == -1)
@@ -559,15 +559,16 @@ namespace HsMod
                 skinPet.ConfigFile.Save();
                 CollectionManager.Get()?.OnCollectionChanged();
 
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"HsMod BG pet favorite => {skinPet.Value}");
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"HsMod local pet favorite => {skinPet.Value}");
                 return skinPet.Value;
             }
 
             [HarmonyPrefix]
             [HarmonyPatch(typeof(PetDetailDisplay), "OnWidgetEvent")]
-            public static bool PatchPetDetailDisplayOnWidgetEvent(PetDetailDisplay __instance, string e, ref bool ___m_isWaitingForFavoritePetResponse, bool ___m_isBattlegroundsMode)
+            public static bool PatchPetDetailDisplayOnWidgetEvent(PetDetailDisplay __instance, string e, ref bool ___m_isWaitingForFavoritePetResponse)
             {
-                if (!IsLocalPetOverrideEnabled() || !___m_isBattlegroundsMode || e != "TogglePetFavorite")
+                //普通收藏与酒馆收藏共用同一个详情面板，两种模式下都要本地接管
+                if (!IsLocalPetOverrideEnabled() || e != "TogglePetFavorite")
                     return true;
 
                 Hearthstone.DataModels.PetDataModel petDataModel = __instance.PetDataModel;
@@ -575,7 +576,7 @@ namespace HsMod
                     return false;
 
                 bool favorite = !petDataModel.IsFavorite;
-                int petVariantId = SaveLocalBgsPetFavorite(petDataModel.PetDbiId, favorite);
+                int petVariantId = SaveLocalPetFavorite(petDataModel.PetDbiId, favorite);
                 if (petVariantId != -1)
                 {
                     petDataModel.IsFavorite = favorite;
@@ -588,9 +589,10 @@ namespace HsMod
 
             [HarmonyPostfix]
             [HarmonyPatch(typeof(PetPreviewDetail), "OnWidgetEvent")]
-            public static void PatchPetPreviewDetailOnWidgetEvent(string e, ref bool ___m_isWaitingForFavoritePetResponse, bool ___m_isBattlegroundsMode)
+            public static void PatchPetPreviewDetailOnWidgetEvent(string e, ref bool ___m_isWaitingForFavoritePetResponse)
             {
-                if (IsLocalPetOverrideEnabled() && ___m_isBattlegroundsMode && e == "CODE_FAVORITE_VARIANT")
+                //本地接管后不会再有服务器响应，必须自行复位等待标记，否则后续点击被忽略
+                if (IsLocalPetOverrideEnabled() && e == "CODE_FAVORITE_VARIANT")
                     ___m_isWaitingForFavoritePetResponse = false;
             }
 
@@ -601,8 +603,10 @@ namespace HsMod
                 if (!IsLocalPetOverrideEnabled())
                     return true;
 
-                isHsFav = false;
-                isBgFav = skinPet.Value != -1 && skinPet.Value == petVariantId;
+                //普通收藏读 isHsFav、酒馆收藏读 isBgFav，本地只有一份偏爱数据，两者都返回
+                bool favorite = skinPet.Value != -1 && skinPet.Value == petVariantId;
+                isHsFav = favorite;
+                isBgFav = favorite;
                 return false;
             }
 
@@ -613,8 +617,9 @@ namespace HsMod
                 if (!IsLocalPetOverrideEnabled())
                     return true;
 
-                isHsFav = false;
-                isBgFav = skinPet.Value != -1 && GetPetIdFromVariant(skinPet.Value) == petId;
+                bool favorite = skinPet.Value != -1 && GetPetIdFromVariant(skinPet.Value) == petId;
+                isHsFav = favorite;
+                isBgFav = favorite;
                 return false;
             }
 
@@ -642,6 +647,19 @@ namespace HsMod
                 return false;
             }
 
+            //PetPreviewDetail 内部另有一份同名私有判断，决定偏爱按钮的启用状态；
+            //本地只有一份偏爱数据，不放开的话设置后就再也取消不掉
+            [HarmonyPrefix]
+            [HarmonyPatch(typeof(PetPreviewDetail), "CanUnfavoritePetVariant")]
+            public static bool PatchPetPreviewDetailCanUnfavoritePetVariant(ref bool __result)
+            {
+                if (!IsLocalPetOverrideEnabled())
+                    return true;
+
+                __result = true;
+                return false;
+            }
+
             [HarmonyPrefix]
             [HarmonyPatch(typeof(Network), "SetFavoritePetVariant")]
             public static bool PatchSetFavoritePetVariant(int petVariantId, System.Nullable<bool> isHsFavorite, System.Nullable<bool> isBgFavorite)
@@ -655,7 +673,7 @@ namespace HsMod
                 skinPet.ConfigFile.Save();
                 CollectionManager.Get()?.OnCollectionChanged();
 
-                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"HsMod BG pet favorite => {skinPet.Value}");
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, $"HsMod local pet favorite => {skinPet.Value}");
                 return false;
             }
 
@@ -666,7 +684,7 @@ namespace HsMod
                 if (!IsLocalPetOverrideEnabled() || (!isBgFavorite.HasValue && !isHsFavorite.HasValue))
                     return true;
 
-                SaveLocalBgsPetFavorite(petId, isBgFavorite ?? isHsFavorite.Value);
+                SaveLocalPetFavorite(petId, isBgFavorite ?? isHsFavorite.Value);
                 return false;
             }
 
