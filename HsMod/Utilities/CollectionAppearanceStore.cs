@@ -32,9 +32,16 @@ namespace HsMod
 			}
 		}
 
+		//游戏运行时的 Newtonsoft 是裁剪版，没有 SerializeObject(object, Formatting) 重载，
+		//改用 JsonSerializerSettings.Indented 得到同样的缩进输出
+		private static readonly JsonSerializerSettings IndentedSettings = new JsonSerializerSettings
+		{
+			Formatting = Formatting.Indented
+		};
+
 		internal void Save()
 		{
-			WriteUtf8Atomic(Path, JsonConvert.SerializeObject((object)Data, (Formatting)1) + "\r\n");
+			WriteUtf8Atomic(Path, JsonConvert.SerializeObject(Data, IndentedSettings) + "\r\n");
 		}
 
 		internal static List<int> DistinctIds(IEnumerable<int> ids, int minimum)

@@ -925,6 +925,32 @@ namespace HsMod
                     //UpdateCardsMappingReal(cardId, Utils.SkinType.COIN);
                     cardId = GameUtils.TranslateDbIdToCardId(skinCoin.Value);
                 }
+            //本地收藏偏爱的英雄：对局内把英雄卡替换为收藏页选定的皮肤
+            //（收藏界面的显示由 PatchCollectionUnlock.GetDisplayHeroCardID 负责，此处负责对局内实际生效）
+            try
+            {
+                //仅对英雄卡生效：确认 cardId 是英雄且职业匹配，避免误替换随从/法术
+                if (isCollectionUnlockEnable.Value
+                    && __instance.GetCard()?.GetControllerSide() == global::Player.Side.FRIENDLY
+                    && !string.IsNullOrEmpty(cardId)
+                    && Utils.CheckInfo.IsHero(cardId, out _))
+                {
+                    EntityDef localDef = DefLoader.Get()?.GetEntityDef(cardId);
+                    if (localDef != null)
+                    {
+                        string localHero = PatchCollectionUnlock.GetLocalHeroForClass(localDef.GetClass());
+                        if (!string.IsNullOrEmpty(localHero) && localHero != cardId)
+                        {
+                            cardId = localHero;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Utils.MyLogger(BepInEx.Logging.LogLevel.Warning, "本地收藏英雄应用失败: " + ex.Message);
+            }
+
             LoadCardEnd:    // todo: check Signature
                 try
                 {
